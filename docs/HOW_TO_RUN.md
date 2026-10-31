@@ -26,6 +26,21 @@
 
 ---
 
+## Clean Start (reset to factory state)
+
+```powershell
+cd "d:\B Tech\bankshield\server"
+npm run db:fresh        # wipes all data, re-seeds roles + super-admin only
+```
+
+# Then create users through the app:
+# 1. Log in as super-admin → register branch_manager + fraud_analyst users
+# 2. Log in as branch_manager → create customers and open their accounts
+# 3. Log in as customer → see the "Getting Started" onboarding panel
+#    → once accounts are opened by branch, the full dashboard appears
+
+---
+
 ## 2. One-Time Environment Setup
 
 ### 2a. Database — `server/.env`
@@ -140,8 +155,9 @@ npm run dev
 |---|---|---|
 | Super Admin | `superadmin@bankshield.internal` | `BankShield@Super2025!` |
 
-To create other role users, log in as super admin then use the
-**Register** endpoint or the User Management page.
+> **All other users are created through the application.**
+> Log in as super-admin → register branch managers and fraud analysts.
+> Log in as branch manager → create customer profiles and open accounts.
 
 ---
 
