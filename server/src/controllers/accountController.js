@@ -28,6 +28,7 @@ import {
 } from '../services/accountService.js';
 import { success, failure } from '../utils/response.js';
 import { logger }           from '../utils/logger.js';
+import { findCustomerByUserId } from '../db/queries/customerQueries.js';
 
 const getMeta = (req) => ({
   actorId  : req.user?.id   ?? null,
@@ -78,12 +79,20 @@ export const listAccountTypes = async (_req, res) => {
 // POST /api/accounts
 export const openAccount = async (req, res) => {
   try {
-    const { customerId, accountType, branchId, currency, nomineeName, jointHolderId } = req.body;
+    let {
+      customerId, accountType, branchId, currency, nomineeName, jointHolderId,
+      accountNumber, bankName, ifscCode, initialBalance,
+    } = req.body;
+    if (!customerId && req.user?.role === 'customer') {
+      const cust = await findCustomerByUserId(req.user.id);
+      if (!cust) return failure(res, 'Customer profile not found for current user.', 404);
+      customerId = cust.id;
+    }
     const account = await openAccountService(
-      { customerId, accountType, branchId, currency, nomineeName, jointHolderId },
+      { customerId, accountType, branchId, currency, nomineeName, jointHolderId, accountNumber, bankName, ifscCode, initialBalance },
       getMeta(req)
     );
-    return success(res, { account }, 'Account opened successfully.', 201);
+    return success(res, { account }, 'Bank account linked successfully.', 201);
   } catch (err) { return handleErr(err, res); }
 };
 
@@ -91,6 +100,12 @@ export const openAccount = async (req, res) => {
 export const getAccount = async (req, res) => {
   try {
     const account = await getAccountService(req.params.id);
+    if (req.user?.role === 'customer') {
+      const cust = await findCustomerByUserId(req.user.id);
+      if (!cust || account.customer_id !== cust.id) {
+        return failure(res, 'Account not found.', 404);
+      }
+    }
     return success(res, { account }, 'Account retrieved.');
   } catch (err) { return handleErr(err, res); }
 };
@@ -98,7 +113,15 @@ export const getAccount = async (req, res) => {
 // GET /api/accounts
 export const listAccounts = async (req, res) => {
   try {
-    const result = await listAccountsService(req.query);
+    const query = { ...req.query };
+    if (req.user?.role === 'customer') {
+      const cust = await findCustomerByUserId(req.user.id);
+      if (!cust) {
+        return success(res, { data: [], pagination: { total: 0, page: 1, pages: 0, limit: 20, offset: 0 } }, 'Accounts retrieved.');
+      }
+      query.customerId = cust.id;
+    }
+    const result = await listAccountsService(query);
     return success(res, result, 'Accounts retrieved.');
   } catch (err) { return handleErr(err, res); }
 };
@@ -131,8 +154,13 @@ export const activateAccount = async (req, res) => {
 // PATCH /api/accounts/:id/close
 export const closeAccount = async (req, res) => {
   try {
-    const account = await closeAccountService(req.params.id, getMeta(req));
-    return success(res, { account }, 'Account closed.');
+    const meta = getMeta(req);
+    if (req.user?.role === 'customer') {
+      meta.customerUserId = req.user.id;
+    }
+    meta.zeroBalance = req.body?.zeroBalance ?? true;
+    const account = await closeAccountService(req.params.id, meta);
+    return success(res, { account }, 'Account closed successfully.');
   } catch (err) { return handleErr(err, res); }
 };
 

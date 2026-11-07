@@ -155,16 +155,19 @@ const ROLE_PERMISSIONS = {
   super_admin: [
     'users:read','users:create','users:update','users:delete','users:manage_roles',
     'audit:read','audit:export',
+    'reports:read','reports:create','reports:export',
     'system:config','system:seed','system:migrate',
   ],
 
   branch_manager: [
     'customers:read','customers:create','customers:update','customers:kyc_verify',
-    'accounts:read','accounts:create','accounts:update','accounts:freeze',
+    'accounts:read',
+    'accounts:create',
+    'accounts:close','accounts:update','accounts:freeze',
     'transactions:read','transactions:create',
     'cards:read','cards:block',
-    'fraud:read_alerts','fraud:manage_alerts','fraud:report',
-    'reports:read','reports:create',
+    'fraud:read_alerts','fraud:manage_alerts','fraud:add_notes','fraud:report',
+    'reports:read','reports:create','reports:export',
     'audit:read',
   ],
 
@@ -172,19 +175,25 @@ const ROLE_PERMISSIONS = {
     'users:read',
     'customers:read',
     'accounts:read',
+    'accounts:create',
+    'accounts:close',
     'transactions:read',
     'cards:read',
     'fraud:read_alerts','fraud:manage_alerts','fraud:investigate','fraud:add_notes','fraud:view_ml','fraud:report','fraud:dispute',
-    'reports:read','reports:create',
+    'reports:read','reports:create','reports:export',
     'audit:read',
   ],
 
   customer: [
     'accounts:read',
-    'transactions:read','transactions:create',
+    'accounts:create',
+    'accounts:close',
+    'transactions:read',
     'cards:read',
     'reports:read',
-    'fraud:report','fraud:dispute',
+    'fraud:read_alerts',
+    'fraud:report',
+    'fraud:dispute',
   ],
 };
 
@@ -200,6 +209,37 @@ const SUPER_ADMIN = {
   last_name  : 'Admin',
   role_name  : 'super_admin',
 };
+
+const ROLE_USERS = [
+  {
+    email: 'analyst@bankshield.in',
+    password: process.env.FRAUD_ANALYST_PASSWORD || 'Analyst@12345!',
+    first_name: 'Fraud',
+    last_name: 'Analyst',
+    role_name: 'fraud_analyst',
+  },
+  {
+    email: 'fraud@bankshield.internal',
+    password: process.env.FRAUD_ANALYST_PASSWORD || 'Analyst@12345!',
+    first_name: 'Fraud',
+    last_name: 'Investigator',
+    role_name: 'fraud_analyst',
+  },
+  {
+    email: 'manager@bankshield.internal',
+    password: process.env.BRANCH_MANAGER_PASSWORD || 'BranchManager@2025!',
+    first_name: 'Branch',
+    last_name: 'Manager',
+    role_name: 'branch_manager',
+  },
+  {
+    email: 'samdae@email.com',
+    password: process.env.CUSTOMER_PASSWORD || 'BankShield@Sam2025!',
+    first_name: 'Sam',
+    last_name: 'Dae',
+    role_name: 'customer',
+  },
+];
 
 // ============================================================================
 // SEEDING FUNCTIONS
@@ -340,6 +380,69 @@ async function seedSuperAdmin(client) {
   );
 }
 
+async function seedRoleUsers(client) {
+  log.info('Seeding staff & demo role users…');
+
+  const { rows: roleRows } = await client.query('SELECT id, name FROM roles');
+  const roleMap = new Map(roleRows.map((r) => [r.name, r.id]));
+
+  await client.query('BEGIN');
+  try {
+    for (const u of ROLE_USERS) {
+      const roleId = roleMap.get(u.role_name);
+      if (!roleId) continue;
+
+      const password_hash = await bcrypt.hash(u.password, SALT_ROUNDS);
+
+      const { rows: userRows } = await client.query(
+        `INSERT INTO users
+           (email, password_hash, first_name, last_name, role_id,
+            is_active, is_verified, failed_login_attempts, locked_until, password_changed_at)
+         VALUES ($1, $2, $3, $4, $5, TRUE, TRUE, 0, NULL, NOW())
+         ON CONFLICT (email) DO UPDATE
+           SET password_hash       = EXCLUDED.password_hash,
+               first_name          = EXCLUDED.first_name,
+               last_name           = EXCLUDED.last_name,
+               role_id             = EXCLUDED.role_id,
+               is_active           = TRUE,
+               is_verified         = TRUE,
+               failed_login_attempts = 0,
+               locked_until        = NULL,
+               password_changed_at = NOW(),
+               updated_at          = NOW()
+         RETURNING id, email`,
+        [u.email, password_hash, u.first_name, u.last_name, roleId]
+      );
+
+      const user = userRows[0];
+      if (u.role_name === 'customer') {
+        const { rows: custRows } = await client.query(
+          `INSERT INTO customers (user_id, customer_number, risk_rating, segment)
+           VALUES ($1, 'CUST-SAMDAE-001', 'low', 'retail')
+           ON CONFLICT (user_id) DO UPDATE SET updated_at = NOW()
+           RETURNING id`,
+          [user.id]
+        );
+        const customer = custRows[0];
+        const { rows: accRows } = await client.query(
+          `SELECT id FROM accounts WHERE customer_id = $1`,
+          [customer.id]
+        );
+        if (accRows.length === 0) {
+          await client.query(
+            `INSERT INTO accounts
+               (customer_id, account_number, account_type, currency, balance, status, opened_at)
+             VALUES ($1, 'ACC-SAMDAE-001', 'savings', 'INR', 75000.00, 'active', NOW())`,
+            [customer.id]
+          );
+        }
+      }
+      log.ok(`Role user ready → ${u.role_name}: ${u.email}`);
+    }
+    await client.query('COMMIT');
+  } catch (err) { await client.query('ROLLBACK'); throw err; }
+}
+
 // ============================================================================
 // HELPERS
 // ============================================================================
@@ -381,7 +484,7 @@ async function main() {
 
   const pool = new Pool({
     connectionString       : process.env.DATABASE_URL,
-    ssl                    : { rejectUnauthorized: false },
+    ssl                    : false,
     max                    : 5,
     connectionTimeoutMillis: 60_000,
     idleTimeoutMillis      : 60_000,
@@ -397,16 +500,18 @@ async function main() {
     await withClient(pool, (c) => seedPermissions(c));
     await withClient(pool, (c) => seedRolePermissions(c));
     await withClient(pool, (c) => seedSuperAdmin(c));
+    await withClient(pool, (c) => seedRoleUsers(c));
 
     log.title('Seeding complete ✔');
     console.log('');
     console.log(`  Super-admin email    : ${SUPER_ADMIN.email}`);
-    console.log(`  Password env var     : SUPER_ADMIN_PASSWORD`);
     console.log(`  Roles seeded         : ${ROLES.length}`);
     console.log(`  Permissions seeded   : ${PERMISSIONS.length}`);
     console.log('');
-    console.log('  All other users (customers, branch managers, fraud analysts)');
-    console.log('  must be created through the application UI or POST /api/auth/register.');
+    console.log('  Staff & Demo Credentials:');
+    for (const u of ROLE_USERS) {
+      console.log(`    ${u.role_name.padEnd(16)}: ${u.email.padEnd(30)} / ${u.password}`);
+    }
     console.log('');
   } catch (err) {
     log.error(`Seeding failed: ${err.message}`);

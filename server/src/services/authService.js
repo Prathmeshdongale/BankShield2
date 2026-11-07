@@ -3,10 +3,15 @@
  *
  * Responsibilities:
  *  - register          (admin-only; resolves role_id from role name)
- *  - login             (bcrypt verify, lockout check, login_history, JWT pair)
+ *  - login             (bcrypt verify, lockout check, login_history, generates 6-digit OTP)
+ *  - verifyLoginOtp    (verifies single-use OTP, issues JWT pair)
+ *  - resendLoginOtp    (resends fresh 5m OTP)
+ *  - sendSuperAdminOtp (passwordless OTP dispatch to super_admin email)
+ *  - verifySuperAdminOtp (verifies super_admin OTP, issues JWT pair)
+ *  - registerCustomer  (customer self-registration + automatic savings account)
  *  - logout            (revoke refresh token, audit log)
  *  - refreshTokens     (rotate refresh token)
- *  - forgotPassword    (generate reset token, log — no mailer wired yet)
+ *  - forgotPassword    (generate reset token, log)
  *  - resetPassword     (verify token, update hash, revoke all refresh tokens)
  *  - changePassword    (verify current password, update hash)
  *  - updateProfile     (first/last name, phone, avatar)
@@ -23,9 +28,10 @@ import jwt             from 'jsonwebtoken';
 import crypto          from 'crypto';
 import { config }      from '../config/index.js';
 import { logger }      from '../utils/logger.js';
-import { getClient }   from '../db/connection.js';
+import { getClient, query as poolQuery }   from '../db/connection.js';
 import {
   findUserByEmail,
+  findUserByPhone,
   findUserById,
   findRoleByName,
   createUser,
@@ -44,8 +50,13 @@ import {
   updatePassword,
   updateUserProfile,
   getPermissionsForRole,
+  ensureLoginOtpTable,
+  saveLoginOtp,
+  findValidLoginOtp,
+  markLoginOtpUsed,
   insertAuditLog,
 } from '../db/queries/authQueries.js';
+import { sendLoginOtpEmail, sendSuperAdminOtpEmail } from './emailService.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CONSTANTS
@@ -83,6 +94,7 @@ const signAccessToken = (payload) =>
     expiresIn : config.jwt.expiresIn,   // '15m'
     issuer    : 'bankshield',
     audience  : 'bankshield-client',
+    jwtid     : crypto.randomUUID(),
   });
 
 /** Sign a refresh token (7d). */
@@ -91,6 +103,7 @@ const signRefreshToken = (payload) =>
     expiresIn : config.jwt.refreshExpiresIn,  // '7d'
     issuer    : 'bankshield',
     audience  : 'bankshield-client',
+    jwtid     : crypto.randomUUID(),
   });
 
 /** Build the safe public user object returned in API responses. */
@@ -128,6 +141,17 @@ const detectDevice = (ua = '') => {
 export const initAuthTables = async () => {
   await ensureRefreshTokensTable();
   await ensurePasswordResetTable();
+  await ensureLoginOtpTable();
+  try {
+    await poolQuery(`
+      INSERT INTO role_permissions (role_id, permission_id)
+      SELECT r.id, p.id FROM roles r, permissions p
+      WHERE r.name = 'customer' AND p.code = 'transactions:create'
+      ON CONFLICT DO NOTHING;
+    `);
+  } catch (err) {
+    logger.warn(`Could not verify customer transactions:create permission: ${err.message}`);
+  }
   logger.info('Auth runtime tables verified.');
 };
 
@@ -137,30 +161,27 @@ export const initAuthTables = async () => {
 
 /**
  * Register a new user.
- * @param {object} opts
- * @param {string} opts.email
- * @param {string} opts.password       plaintext — will be hashed
- * @param {string} opts.firstName
- * @param {string} opts.lastName
- * @param {string} [opts.phone]
- * @param {string} [opts.roleName='customer']  role_name enum value
- * @param {object} meta   { ipAddress, userAgent } for audit log
- * @param {string} actorId  UUID of the admin user performing registration
  */
 export const registerUser = async (
   { email, password, firstName, lastName, phone = null, roleName = 'customer' },
   meta = {},
   actorId = null
 ) => {
-  // 1. Check email not already taken
   const existing = await findUserByEmail(email);
+  if (phone) {
+    const existingPhone = await findUserByPhone(phone);
+    if (existingPhone) {
+      const err = new Error('PHONE_TAKEN');
+      err.statusCode = 409;
+      throw err;
+    }
+  }
   if (existing) {
     const err = new Error('EMAIL_TAKEN');
     err.statusCode = 409;
     throw err;
   }
 
-  // 2. Resolve role — default to 'customer' if not found / inactive
   const role = await findRoleByName(roleName);
   if (!role || !role.is_active) {
     const err = new Error('INVALID_ROLE');
@@ -168,10 +189,8 @@ export const registerUser = async (
     throw err;
   }
 
-  // 3. Hash password
   const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
 
-  // 4. Insert user
   const user = await createUser({
     email,
     phone,
@@ -181,7 +200,6 @@ export const registerUser = async (
     roleId: role.id,
   });
 
-  // 5. Audit log
   await insertAuditLog({
     userId    : actorId,
     action    : 'USER_REGISTERED',
@@ -198,13 +216,12 @@ export const registerUser = async (
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 2. LOGIN
+// 2. LOGIN (Step 1: Validate Credentials & Dispatch OTP)
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
  * Authenticate a user by email + password.
- * Returns { user, accessToken, refreshToken } on success.
- * Throws coded errors for rate-limit, lockout, wrong creds, inactive account.
+ * Returns { requiresOtp: true, email, role, firstName, devOtp } on success.
  */
 export const loginUser = async ({ email, password }, meta = {}) => {
   const ip        = meta.ipAddress ?? null;
@@ -214,7 +231,6 @@ export const loginUser = async ({ email, password }, meta = {}) => {
   // 1. Find user
   const user = await findUserByEmail(email);
 
-  // Generic helper — log failed attempt if we found the user row
   const logFail = async (reason) => {
     if (user) {
       await recordFailedLogin(user.id, MAX_LOGIN_ATTEMPTS, LOCKOUT_MINUTES);
@@ -267,8 +283,27 @@ export const loginUser = async ({ email, password }, meta = {}) => {
     throw err;
   }
 
-  // 5. Verify password
-  const passwordMatch = await bcrypt.compare(password, user.password_hash);
+  // 5. Verify password (bypassed for super_admin: superadmin logs in by only OTP on email)
+  if (user.role === 'super_admin') {
+    const otp = String(crypto.randomInt(100000, 1000000));
+    await saveLoginOtp(user.email, otp, 5);
+    await sendLoginOtpEmail({
+      email: user.email,
+      otp,
+      name: user.first_name,
+      role: user.role,
+    });
+    logger.info(`Super Admin passwordless OTP dispatched to: ${user.email}`);
+    return {
+      requiresOtp: true,
+      email: user.email,
+      role: user.role,
+      firstName: user.first_name,
+      devOtp: process.env.NODE_ENV !== 'production' ? otp : null,
+    };
+  }
+
+  const passwordMatch = password ? await bcrypt.compare(password, user.password_hash) : false;
   if (!passwordMatch) {
     await logFail('WRONG_PASSWORD');
     const err = new Error('INVALID_CREDENTIALS');
@@ -276,48 +311,25 @@ export const loginUser = async ({ email, password }, meta = {}) => {
     throw err;
   }
 
-  // 6. Stamp last_login + reset failure counter
-  await recordSuccessfulLogin(user.id);
-
-  // 7. Log history
-  await insertLoginHistory({
-    userId  : user.id, ipAddress: ip, userAgent: ua,
-    deviceType: device, status: 'success',
+  // 6. Generate 6-digit cryptographically secure OTP (5-minute expiry) for ALL roles
+  const otp = String(crypto.randomInt(100000, 1000000));
+  await saveLoginOtp(user.email, otp, 5);
+  await sendLoginOtpEmail({
+    email: user.email,
+    otp,
+    name: user.first_name,
+    role: user.role,
   });
 
-  // 8. Fetch permissions for this role
-  const permissions = await getPermissionsForRole(user.role_id);
+  logger.info(`Login OTP generated for: ${user.email} (role: ${user.role})`);
 
-  // 9. Mint tokens
-  const payload      = buildJwtPayload(user);
-  const accessToken  = signAccessToken(payload);
-  const refreshToken = signRefreshToken(payload);
-
-  // 10. Persist hashed refresh token
-  const tokenHash = hashToken(refreshToken);
-  await saveRefreshToken({
-    userId   : user.id,
-    tokenHash,
-    expiresAt: new Date(Date.now() + REFRESH_TOKEN_TTL_MS),
-  });
-
-  // 11. Audit log
-  await insertAuditLog({
-    userId    : user.id,
-    action    : 'LOGIN_SUCCESS',
-    entityType: 'user',
-    entityId  : user.id,
-    ipAddress : ip,
-    userAgent : ua,
-    status    : 'success',
-  });
-
-  logger.info(`Login success: ${user.email} from ${ip ?? 'unknown'}`);
-
+  // Tokens are NOT issued here. Tokens are issued ONLY upon successful OTP verification.
   return {
-    user        : publicUser(user, permissions),
-    accessToken,
-    refreshToken,
+    requiresOtp: true,
+    email: user.email,
+    role: user.role,
+    firstName: user.first_name,
+    devOtp: process.env.NODE_ENV !== 'production' ? otp : undefined,
   };
 };
 
@@ -325,10 +337,6 @@ export const loginUser = async ({ email, password }, meta = {}) => {
 // 3. LOGOUT
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Logout: revoke the supplied refresh token.
- * Pass logoutAll=true to revoke all sessions for the user.
- */
 export const logoutUser = async ({ userId, refreshToken, logoutAll = false }, meta = {}) => {
   if (logoutAll) {
     await revokeAllUserRefreshTokens(userId);
@@ -353,12 +361,7 @@ export const logoutUser = async ({ userId, refreshToken, logoutAll = false }, me
 // 4. REFRESH TOKENS
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Validate an incoming refresh token and issue a new access+refresh pair
- * (refresh token rotation — old token is revoked on success).
- */
 export const refreshTokens = async (incomingRefreshToken, meta = {}) => {
-  // 1. Verify JWT signature + expiry
   let decoded;
   try {
     decoded = jwt.verify(incomingRefreshToken, config.jwt.refreshSecret, {
@@ -371,7 +374,6 @@ export const refreshTokens = async (incomingRefreshToken, meta = {}) => {
     throw err;
   }
 
-  // 2. Check token is in the DB and not revoked
   const tokenHash   = hashToken(incomingRefreshToken);
   const storedToken = await findRefreshToken(tokenHash);
   if (!storedToken) {
@@ -380,7 +382,6 @@ export const refreshTokens = async (incomingRefreshToken, meta = {}) => {
     throw err;
   }
 
-  // 3. Load current user state
   const user = await findUserById(decoded.sub);
   if (!user || !user.is_active) {
     const err = new Error('ACCOUNT_INACTIVE');
@@ -388,10 +389,8 @@ export const refreshTokens = async (incomingRefreshToken, meta = {}) => {
     throw err;
   }
 
-  // 4. Revoke old refresh token (rotation)
   await revokeRefreshToken(tokenHash);
 
-  // 5. Mint new pair
   const permissions  = await getPermissionsForRole(user.role_id);
   const payload      = buildJwtPayload(user);
   const accessToken  = signAccessToken(payload);
@@ -423,25 +422,11 @@ export const refreshTokens = async (incomingRefreshToken, meta = {}) => {
 // 5. FORGOT PASSWORD
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Generate a password-reset token for the given email.
- *
- * Returns { token, email, expiresAt } — the caller (controller) is
- * responsible for sending the email. We return the token here so the
- * controller can pass it to a mailer service without coupling this module
- * to any specific email provider.
- *
- * If the email is not found we return the same shape silently (prevents
- * email enumeration).
- */
 export const forgotPassword = async (email, meta = {}) => {
   const user = await findUserByEmail(email);
-
-  // Always respond identically regardless of whether user exists
   const expiresAt = new Date(Date.now() + RESET_TOKEN_TTL_MINS * 60 * 1000);
 
   if (!user || !user.is_active) {
-    // Don't leak whether the email exists
     return { email, expiresAt, token: null };
   }
 
@@ -468,10 +453,6 @@ export const forgotPassword = async (email, meta = {}) => {
 // 6. RESET PASSWORD
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Consume a reset token and set a new password.
- * Also revokes all active refresh tokens for the user (force re-login).
- */
 export const resetPassword = async ({ token, newPassword }, meta = {}) => {
   const tokenHash   = hashToken(token);
   const resetRecord = await findPasswordResetToken(tokenHash);
@@ -491,7 +472,6 @@ export const resetPassword = async ({ token, newPassword }, meta = {}) => {
 
   const newHash = await bcrypt.hash(newPassword, SALT_ROUNDS);
 
-  // All three mutations in a transaction
   const client = await getClient();
   try {
     await client.query('BEGIN');
@@ -520,13 +500,9 @@ export const resetPassword = async ({ token, newPassword }, meta = {}) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 7. CHANGE PASSWORD  (authenticated user)
+// 7. CHANGE PASSWORD
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Verify the current password then update to the new one.
- * Rotates all refresh tokens so other sessions are forced to re-login.
- */
 export const changePassword = async ({ userId, currentPassword, newPassword }, meta = {}) => {
   const user = await findUserById(userId);
   if (!user) {
@@ -597,7 +573,7 @@ export const updateProfile = async (userId, fields, meta = {}) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 9. GET PROFILE  (authenticated user)
+// 9. GET PROFILE
 // ─────────────────────────────────────────────────────────────────────────────
 
 export const getProfile = async (userId) => {
@@ -609,4 +585,309 @@ export const getProfile = async (userId) => {
   }
   const permissions = await getPermissionsForRole(user.role_id);
   return publicUser(user, permissions);
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 10. SUPER ADMIN PASSWORDLESS EMAIL OTP LOGIN
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Send 6-digit OTP to Super Admin email for passwordless OTP sign-in.
+ */
+export const sendSuperAdminOtp = async (email) => {
+  const user = await findUserByEmail(email);
+  if (!user || user.role !== 'super_admin') {
+    const err = new Error('SUPERADMIN_ONLY');
+    err.statusCode = 403;
+    throw err;
+  }
+
+  if (!user.is_active || user.deleted_at) {
+    const err = new Error('ACCOUNT_INACTIVE');
+    err.statusCode = 403;
+    throw err;
+  }
+
+  if (user.locked_until && new Date(user.locked_until) > new Date()) {
+    const err = new Error('ACCOUNT_LOCKED');
+    err.statusCode = 423;
+    err.lockedUntil = user.locked_until;
+    throw err;
+  }
+
+  const otp = String(crypto.randomInt(100000, 1000000));
+  await saveLoginOtp(user.email, otp, 5);
+  await sendSuperAdminOtpEmail(user.email, otp);
+
+  logger.info(`Super Admin OTP generated for: ${user.email}`);
+
+  return {
+    requiresOtp: true,
+    email: user.email,
+    role: 'super_admin',
+    firstName: user.first_name,
+    message: 'Super Admin verification code dispatched to email.',
+    devOtp: process.env.NODE_ENV !== 'production' ? otp : undefined,
+  };
+};
+
+/**
+ * Verify Super Admin OTP and issue session tokens.
+ */
+export const verifySuperAdminOtp = async ({ email, otp }, meta = {}) => {
+  const result = await verifyLoginOtp({ email, otp }, meta);
+  if (result.user.role !== 'super_admin') {
+    const err = new Error('SUPERADMIN_ONLY');
+    err.statusCode = 403;
+    throw err;
+  }
+  return result;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 11. UNIFIED OTP VERIFICATION (ALL 4 ROLES)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Verify Login OTP for any of the 4 roles and issue session JWT tokens.
+ */
+export const verifyLoginOtp = async ({ email, otp }, meta = {}) => {
+  const ip     = meta.ipAddress ?? null;
+  const ua     = meta.userAgent ?? '';
+  const device = detectDevice(ua);
+
+  const user = await findUserByEmail(email);
+  if (!user) {
+    const err = new Error('INVALID_CREDENTIALS');
+    err.statusCode = 401;
+    throw err;
+  }
+
+  if (!user.is_active || user.deleted_at) {
+    const err = new Error('ACCOUNT_INACTIVE');
+    err.statusCode = 403;
+    throw err;
+  }
+
+  if (user.locked_until && new Date(user.locked_until) > new Date()) {
+    const err = new Error('ACCOUNT_LOCKED');
+    err.statusCode = 423;
+    err.lockedUntil = user.locked_until;
+    throw err;
+  }
+
+  const validOtp = await findValidLoginOtp(email, otp);
+  if (!validOtp) {
+    await recordFailedLogin(user.id, MAX_LOGIN_ATTEMPTS, LOCKOUT_MINUTES);
+    await insertLoginHistory({
+      userId: user.id,
+      ipAddress: ip,
+      userAgent: ua,
+      deviceType: device,
+      status: 'failed',
+      failureReason: 'INVALID_OR_EXPIRED_OTP',
+    });
+    const err = new Error('INVALID_OTP');
+    err.statusCode = 401;
+    throw err;
+  }
+
+  // Mark OTP used (single use)
+  await markLoginOtpUsed(validOtp.id);
+  await recordSuccessfulLogin(user.id);
+  await insertLoginHistory({
+    userId: user.id,
+    ipAddress: ip,
+    userAgent: ua,
+    deviceType: device,
+    status: 'success',
+  });
+
+  const permissions = await getPermissionsForRole(user.role_id);
+  const payload     = buildJwtPayload(user);
+  const accessToken = signAccessToken(payload);
+  const refreshToken= signRefreshToken(payload);
+
+  const tokenHash   = hashToken(refreshToken);
+  await saveRefreshToken({
+    userId: user.id,
+    tokenHash,
+    expiresAt: new Date(Date.now() + REFRESH_TOKEN_TTL_MS),
+  });
+
+  await insertAuditLog({
+    userId: user.id,
+    action: 'LOGIN_OTP_VERIFIED',
+    entityType: 'user',
+    entityId: user.id,
+    ipAddress: ip,
+    userAgent: ua,
+    status: 'success',
+    newValue: { role: user.role },
+  });
+
+  logger.info(`User successfully verified OTP and authenticated: ${user.email} (role: ${user.role})`);
+
+  return {
+    user: publicUser(user, permissions),
+    accessToken,
+    refreshToken,
+  };
+};
+
+/**
+ * Resend a new 5-minute login OTP.
+ */
+export const resendLoginOtp = async (email) => {
+  const user = await findUserByEmail(email);
+  if (!user) {
+    const err = new Error('USER_NOT_FOUND');
+    err.statusCode = 404;
+    throw err;
+  }
+
+  if (!user.is_active || user.deleted_at) {
+    const err = new Error('ACCOUNT_INACTIVE');
+    err.statusCode = 403;
+    throw err;
+  }
+
+  if (user.locked_until && new Date(user.locked_until) > new Date()) {
+    const err = new Error('ACCOUNT_LOCKED');
+    err.statusCode = 423;
+    err.lockedUntil = user.locked_until;
+    throw err;
+  }
+
+  const otp = String(crypto.randomInt(100000, 1000000));
+  await saveLoginOtp(user.email, otp, 5);
+  await sendLoginOtpEmail({
+    email: user.email,
+    otp,
+    name: user.first_name,
+    role: user.role,
+  });
+
+  return {
+    message: 'New verification OTP sent to your registered email.',
+    email: user.email,
+    devOtp: process.env.NODE_ENV !== 'production' ? otp : undefined,
+  };
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 12. CUSTOMER SELF-REGISTRATION
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Register a normal user as a customer, create initial savings account, and issue login OTP.
+ */
+export const registerCustomer = async (
+  { email, password, firstName, lastName, phone = null },
+  meta = {}
+) => {
+  const ip     = meta.ipAddress ?? null;
+  const ua     = meta.userAgent ?? '';
+  const device = detectDevice(ua);
+
+  // 1. Check email uniqueness
+  const existing = await findUserByEmail(email);
+  if (existing) {
+    const err = new Error('EMAIL_TAKEN');
+    err.statusCode = 409;
+    throw err;
+  }
+
+  if (phone) {
+    const existingPhone = await findUserByPhone(phone);
+    if (existingPhone) {
+      const err = new Error('PHONE_TAKEN');
+      err.statusCode = 409;
+      throw err;
+    }
+  }
+
+  // 2. Resolve 'customer' role
+  const role = await findRoleByName('customer');
+  if (!role || !role.is_active) {
+    const err = new Error('INVALID_ROLE');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
+
+  const client = await getClient();
+  try {
+    await client.query('BEGIN');
+
+    // 3. Create user
+    const user = await createUser({
+      email,
+      phone,
+      passwordHash,
+      firstName,
+      lastName,
+      roleId: role.id,
+    }, client);
+
+    // 4. Create customer record
+    const custNum = 'CUST-' + Math.floor(10000000 + Math.random() * 90000000);
+    const custRes = await client.query(`
+      INSERT INTO customers (user_id, customer_number, risk_rating, segment)
+      VALUES ($1, $2, 'low', 'retail')
+      RETURNING id, customer_number;
+    `, [user.id, custNum]);
+    const customer = custRes.rows[0];
+
+    // 5. Create initial active savings account with ₹25,000 balance
+    const accTypeRes = await client.query(`SELECT id FROM account_types WHERE type_name = 'savings' LIMIT 1`);
+    const accountTypeId = accTypeRes.rows[0]?.id || 1;
+    const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+    const accNum = `ACC-${dateStr}-${Math.floor(10000000 + Math.random() * 90000000)}`;
+    const initialDeposit = 25000.00;
+
+    await client.query(`
+      INSERT INTO accounts (account_number, customer_id, account_type_id, currency, balance, available_balance, status)
+      VALUES ($1, $2, $3, 'INR', $4, $4, 'active');
+    `, [accNum, customer.id, accountTypeId, initialDeposit]);
+
+    await client.query('COMMIT');
+
+    const fullUser = { ...user, role: 'customer' };
+    const permissions = await getPermissionsForRole(role.id);
+    const payload     = buildJwtPayload(fullUser);
+    const accessToken = signAccessToken(payload);
+    const refreshToken= signRefreshToken(payload);
+
+    const tokenHash   = hashToken(refreshToken);
+    await saveRefreshToken({
+      userId: user.id,
+      tokenHash,
+      expiresAt: new Date(Date.now() + REFRESH_TOKEN_TTL_MS),
+    });
+
+    await insertAuditLog({
+      userId: user.id,
+      action: 'CUSTOMER_SELF_REGISTERED',
+      entityType: 'user',
+      entityId: user.id,
+      newValue: { email, customerNumber: customer.customer_number, account: accNum },
+      ipAddress: ip,
+      userAgent: ua,
+      status: 'success',
+    });
+
+    return {
+      user: publicUser(fullUser, permissions),
+      accessToken,
+      refreshToken,
+      accountNumber: accNum,
+    };
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
 };

@@ -10,6 +10,7 @@ import { InlineLoader }   from '@/components/ui/LoadingOverlay';
 import { useAuth }        from '@/context/AuthContext';
 
 import Login          from '@/pages/Login';
+import Register       from '@/pages/Register';
 import ForgotPassword from '@/pages/ForgotPassword';
 import ResetPassword  from '@/pages/ResetPassword';
 import Unauthorized   from '@/pages/Unauthorized';
@@ -26,6 +27,7 @@ const CustomerList   = lazy(() => import('@/pages/customers/CustomerList'));
 const CustomerDetail = lazy(() => import('@/pages/customers/CustomerDetail'));
 const AccountList    = lazy(() => import('@/pages/accounts/AccountList'));
 const AccountDetail  = lazy(() => import('@/pages/accounts/AccountDetail'));
+const CardsList      = lazy(() => import('@/pages/cards/CardsList'));
 const CardDetail     = lazy(() => import('@/pages/cards/CardDetail'));
 
 // ── Fraud ─────────────────────────────────────────────────────────────────────
@@ -48,9 +50,11 @@ const CustomerHome      = lazy(() => import('@/pages/portal/CustomerHome'));
 const MyAccounts        = lazy(() => import('@/pages/portal/MyAccounts'));
 const MyAccountDetail   = lazy(() => import('@/pages/portal/MyAccountDetail'));
 const MyTransactions    = lazy(() => import('@/pages/portal/MyTransactions'));
+const MyCards           = lazy(() => import('@/pages/portal/MyCards'));
 const MyAlerts          = lazy(() => import('@/pages/portal/MyAlerts'));
+const SecurityOtpVerification = lazy(() => import('@/pages/portal/SecurityOtpVerification'));
 
-// ── Remaining placeholders ────────────────────────────────────────────────────
+// ── Branches & Notifications ──────────────────────────────────────────────────
 const Branches       = lazy(() => import('@/pages/branches/Branches'));
 const Notifications  = lazy(() => import('@/pages/Notifications'));
 
@@ -61,8 +65,6 @@ const PageLoader = () => (
 );
 
 // ── Dashboard router based on user role ───────────────────────────────────────
-// NOTE: Authentication check is handled by AppLayout and ProtectedRoute
-// This component only handles role-based dashboard selection
 const DashboardRouter = () => {
   const { user, hasRole } = useAuth();
   
@@ -82,7 +84,6 @@ const DashboardRouter = () => {
     return <CustomerDashboard />;
   }
   
-  // Fallback - redirect to unauthorized or customer dashboard
   console.warn(`Unknown role: ${user?.role}. Falling back to customer dashboard.`);
   return <CustomerDashboard />;
 };
@@ -110,6 +111,7 @@ function App() {
             <Routes>
               {/* Public */}
               <Route path="/login"           element={<Login />} />
+              <Route path="/register"        element={<Register />} />
               <Route path="/forgot-password" element={<ForgotPassword />} />
               <Route path="/reset-password"  element={<ResetPassword />} />
               <Route path="/unauthorized"    element={<Unauthorized />} />
@@ -120,21 +122,34 @@ function App() {
                   {/* Role-specific dashboards (rendered inside AppLayout's Outlet) */}
                   <Route index element={<DashboardRouter />} />
                   
-                  <Route path="transactions"      element={<Transactions />} />
-                  <Route path="accounts"          element={<AccountList />} />
-                  <Route path="accounts/:id"      element={<AccountDetail />} />
-                  <Route path="cards"             element={<AccountList />} />
-                  <Route path="cards/:id"         element={<CardDetail />} />
-                  <Route path="transfer"          element={<Transfer />} />
+                  {/* Banking Operations - restricted to branch managers and fraud analysts (Super Admin restricted, Customer uses /portal) */}
+                  <Route element={<ProtectedRoute roles={['branch_manager', 'fraud_analyst']} />}>
+                    <Route path="transactions"      element={<Transactions />} />
+                    <Route path="accounts"          element={<AccountList />} />
+                    <Route path="accounts/:id"      element={<AccountDetail />} />
+                    <Route path="cards"             element={<CardsList />} />
+                    <Route path="cards/:id"         element={<CardDetail />} />
+                    <Route path="customers"         element={<CustomerList />} />
+                    <Route path="customers/:id"     element={<CustomerDetail />} />
+                  </Route>
+
+                  {/* Branch Manager Transfers */}
+                  <Route element={<ProtectedRoute roles={['branch_manager']} />}>
+                    <Route path="transfer"          element={<Transfer />} />
+                  </Route>
+
+                  <Route path="branches"          element={<Branches />} />
                   <Route path="notifications"     element={<Notifications />} />
                   <Route path="reports"           element={<Reports />} />
                   <Route path="profile"           element={<Profile />} />
 
-                  {/* Super Admin - User management and system settings */}
+                  {/* Super Admin - Platform configuration and staff management ONLY (Privacy boundary strictly enforced) */}
                   <Route element={<ProtectedRoute roles={['super_admin']} />}>
                     <Route path="admin/users"         element={<UserManagement />} />
                     <Route path="admin/settings"      element={<SystemSettings />} />
                     <Route path="admin/audit-logs"    element={<AuditLogs />} />
+                    <Route path="admin/branches"      element={<Branches />} />
+                    <Route path="ml/status"           element={<SystemSettings />} />
                   </Route>
 
                   {/* Branch Manager - Branch operations */}
@@ -146,19 +161,27 @@ function App() {
                     <Route path="branch/reports"      element={<Reports />} />
                   </Route>
 
-                  {/* Fraud Analyst - Investigation tools */}
-                  <Route element={<ProtectedRoute roles={['fraud_analyst']} />}>
+                  {/* Fraud Alert Review — Analysts and Branch Managers */}
+                  <Route element={<ProtectedRoute roles={['fraud_analyst', 'branch_manager']} />}>
                     <Route path="fraud/alerts"        element={<FraudAlerts />} />
                     <Route path="fraud/alerts/:id"    element={<AlertDetail />} />
+                  </Route>
+
+                  {/* Fraud Analyst — Deep investigation and ML workbench */}
+                  <Route element={<ProtectedRoute roles={['fraud_analyst']} />}>
                     <Route path="fraud/investigations" element={<Investigations />} />
+                    <Route path="fraud/ml-predictions" element={<FraudAlerts />} />
                   </Route>
 
                   {/* Customer portal - own accounts & transactions only */}
                   <Route path="portal"                element={<CustomerHome />} />
                   <Route path="portal/accounts"       element={<MyAccounts />} />
                   <Route path="portal/accounts/:id"   element={<MyAccountDetail />} />
+                  <Route path="portal/cards"          element={<MyCards />} />
+                  <Route path="portal/cards/:id"      element={<CardDetail />} />
                   <Route path="portal/transactions"   element={<MyTransactions />} />
                   <Route path="portal/alerts"         element={<MyAlerts />} />
+                  <Route path="portal/security-verification" element={<Navigate to="/profile?tab=otp" replace />} />
                 </Route>
               </Route>
 

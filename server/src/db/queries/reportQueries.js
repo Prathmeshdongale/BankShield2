@@ -37,6 +37,7 @@ const REPORT_SELECT = `
     r.parameters, r.status, r.file_upload_id,
     r.error_message, r.started_at, r.completed_at, r.expires_at,
     r.created_at, r.updated_at,
+    COALESCE(r.parameters->>'format', 'pdf') AS format,
     u.first_name AS requester_first_name,
     u.last_name  AS requester_last_name,
     u.email      AS requester_email,
@@ -284,3 +285,27 @@ export const getMonthlyRiskSummary = async ({ dateFrom, dateTo }, client = null)
   `, [dateFrom, dateTo]);
   return rows;
 };
+
+/** System audit trail — actual system audit events (logins, OTP, user/account actions). */
+export const getSystemAuditTrail = async ({ dateFrom, dateTo }, client = null) => {
+  const { rows } = await run(client, `
+    SELECT
+      a.id,
+      a.created_at,
+      a.action,
+      COALESCE(u.email, 'System') AS actor_email,
+      COALESCE(r.name, 'system')  AS actor_role,
+      a.entity_type,
+      a.entity_id,
+      COALESCE(a.ip_address::text, '127.0.0.1') AS ip_address,
+      a.status
+    FROM  audit_logs a
+    LEFT  JOIN users u ON u.id = a.user_id
+    LEFT  JOIN roles r ON r.id = u.role_id
+    WHERE a.created_at >= $1 AND a.created_at <= $2
+    ORDER BY a.created_at DESC
+    LIMIT 2000;
+  `, [dateFrom, dateTo]);
+  return rows;
+};
+

@@ -16,6 +16,7 @@
 
 import { Router }       from 'express';
 import { authenticate, authorize } from '../middleware/authenticate.js';
+import { restrictBankingFromSuperAdmin } from '../middleware/bankingRestriction.js';
 import {
   validate,
   cardIdValidator,
@@ -33,10 +34,12 @@ import {
   listLimits,
   setLimit,
   deleteLimit,
+  deleteCard,
 } from '../controllers/cardController.js';
 
 const router = Router();
 router.use(authenticate);
+router.use(restrictBankingFromSuperAdmin);
 
 // GET /api/cards/:id
 router.get('/:id',
@@ -99,6 +102,13 @@ router.delete('/:id/limits/:limitType',
   authorize('cards:manage_limits'),
   ...deleteLimitValidator, validate,
   deleteLimit
+);
+
+// DELETE /api/cards/:id
+router.delete('/:id',
+  authorize('cards:read'),
+  ...cardIdValidator, validate,
+  deleteCard
 );
 
 export default router;

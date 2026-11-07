@@ -145,14 +145,15 @@ export const listCardsByCustomer = async (customerId, includeInactive = false, c
  */
 export const issueCard = async ({
   accountId, customerId, cardType = 'debit', network = 'rupay',
+  customPan = null, lastFour = null, expiryMonth: customMonth = null, expiryYear: customYear = null,
 }, client = null) => {
-  const pan       = generatePan();
+  const pan       = customPan ? customPan.replace(/\s+/g, '') : generatePan();
   const panHash   = hashPan(pan);
-  const last4     = pan.slice(-4);
+  const last4     = lastFour ? String(lastFour).slice(-4) : pan.slice(-4);
   const now       = new Date();
   const expiryYrs = (cardType === 'credit') ? 5 : 3;
-  const expiryMonth = now.getMonth() + 1;           // 1-indexed
-  const expiryYear  = now.getFullYear() + expiryYrs;
+  const expiryMonth = customMonth ? parseInt(customMonth, 10) : (now.getMonth() + 1);
+  const expiryYear  = customYear  ? parseInt(customYear, 10)  : (now.getFullYear() + expiryYrs);
 
   const { rows } = await run(client, `
     INSERT INTO cards
@@ -274,4 +275,21 @@ export const deleteCardLimit = async (cardId, limitType, client = null) => {
     RETURNING id, limit_type;
   `, [cardId, limitType]);
   return rows[0] ?? null;
+};
+
+/**
+ * Soft-delete a card (sets status = 'blocked', blocked_reason = 'Card removed by user', deleted_at = NOW()).
+ */
+export const deleteCard = async (id, reason = 'Card removed by user', client = null) => {
+  const { rows } = await run(client, `
+    UPDATE cards
+    SET    status         = 'blocked',
+           blocked_at     = NOW(),
+           blocked_reason = $2,
+           deleted_at     = NOW(),
+           updated_at     = NOW()
+    WHERE  id = $1 AND deleted_at IS NULL
+    RETURNING *;
+  `, [id, reason]);
+  return rows[0] ? safeCard(rows[0]) : null;
 };

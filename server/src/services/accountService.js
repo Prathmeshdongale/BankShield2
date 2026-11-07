@@ -27,7 +27,8 @@
 import { logger }         from '../utils/logger.js';
 import { getClient }      from '../db/connection.js';
 import { insertAuditLog } from '../db/queries/authQueries.js';
-import { findCustomerById } from '../db/queries/customerQueries.js';
+import { findCustomerById, findCustomerByUserId } from '../db/queries/customerQueries.js';
+import { creditAccount, insertTransaction } from '../db/queries/transactionQueries.js';
 import {
   nextAccountNumber,
   listAccountTypes       as dbListAccountTypes,
@@ -99,6 +100,8 @@ export const openAccountService = async (fields, meta = {}) => {
   const {
     customerId, accountType, branchId = null,
     currency = 'INR', nomineeName = null, jointHolderId = null,
+    accountNumber: customAccountNumber = null,
+    bankName = null, ifscCode = null, initialBalance = null,
   } = fields;
 
   // 1. Validate account type is openable via API
@@ -114,16 +117,50 @@ export const openAccountService = async (fields, meta = {}) => {
   const customer = await findCustomerById(customerId);
   if (!customer) throw mkErr('CUSTOMER_NOT_FOUND', 404);
 
-  // 4. Generate unique account number inside a transaction
+  // 4. Determine account number
+  let finalAccountNumber = customAccountNumber ? String(customAccountNumber).trim().toUpperCase() : null;
+  if (finalAccountNumber) {
+    const existing = await findAccountByNumber(finalAccountNumber);
+    if (existing) {
+      if (existing.customer_id === customerId) {
+        return findAccountById(existing.id);
+      }
+      throw mkErr('An account with this account number is already linked to another customer.', 409);
+    }
+  }
+
+  // 5. Create / Link account inside a transaction
   const client = await getClient();
   let account;
   try {
     await client.query('BEGIN');
-    const accountNumber = await nextAccountNumber(client);
+    if (!finalAccountNumber) {
+      finalAccountNumber = await nextAccountNumber(client);
+    }
     account = await dbCreateAccount({
-      accountNumber, customerId, branchId, accountTypeId: accType.id,
+      accountNumber: finalAccountNumber, customerId, branchId, accountTypeId: accType.id,
       currency, nomineeName, jointHolderId,
     }, client);
+
+    // If initial verified balance is provided (from UPI bank linking), credit it immediately
+    const initBal = parseFloat(initialBalance);
+    if (!isNaN(initBal) && initBal > 0) {
+      await creditAccount(account.id, initBal, client);
+      await insertTransaction({
+        transactionRef: `INIT-${Date.now().toString(36).toUpperCase()}-${Math.floor(1000 + Math.random() * 9000)}`,
+        destinationAccountId: account.id,
+        amount: initBal,
+        currency,
+        txnType: 'deposit',
+        status: 'completed',
+        channel: 'branch',
+        description: bankName ? `Linked ${bankName} account verified balance` : 'Opening balance for linked bank account',
+        riskScore: 0.02,
+        isFraud: false,
+        completedAt: new Date().toISOString(),
+      }, client);
+    }
+
     await client.query('COMMIT');
   } catch (err) {
     await client.query('ROLLBACK');
@@ -135,11 +172,11 @@ export const openAccountService = async (fields, meta = {}) => {
   await insertAuditLog({
     userId: meta.actorId, action: 'ACCOUNT_OPENED',
     entityType: 'account', entityId: account.id,
-    newValue: { accountNumber: account.account_number, accountType, customerId },
+    newValue: { accountNumber: account.account_number, accountType, customerId, bankName, ifscCode },
     ipAddress: meta.ipAddress, userAgent: meta.userAgent, status: 'success',
   });
 
-  logger.info(`Account opened: ${account.account_number} (${accountType}) for customer ${customerId}`);
+  logger.info(`Account linked: ${account.account_number} (${accountType}) for customer ${customerId}`);
   // Return full enriched row
   return findAccountById(account.id);
 };
@@ -261,8 +298,23 @@ export const closeAccountService = async (id, meta = {}) => {
   if (!existing) throw mkErr('ACCOUNT_NOT_FOUND', 404);
   if (existing.status === 'closed') throw mkErr('ACCOUNT_ALREADY_CLOSED', 409);
 
-  // Safety: do not allow closing an account with a positive balance
-  if (parseFloat(existing.balance) > 0) {
+  // If customer role, verify account belongs to them
+  if (meta.customerUserId) {
+    const cust = await findCustomerByUserId(meta.customerUserId);
+    if (!cust || existing.customer_id !== cust.id) {
+      throw mkErr('FORBIDDEN', 403);
+    }
+  }
+
+  // Safety / settlement: if zeroBalance is requested, zero out the balance
+  if (meta.zeroBalance && parseFloat(existing.balance) > 0) {
+    const client = await getClient();
+    try {
+      await client.query('UPDATE accounts SET balance = 0.00, updated_at = NOW() WHERE id = $1', [id]);
+    } finally {
+      client.release();
+    }
+  } else if (parseFloat(existing.balance) > 0) {
     throw mkErr('ACCOUNT_HAS_BALANCE', 400);
   }
 

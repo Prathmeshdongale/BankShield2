@@ -28,9 +28,12 @@ import {
   listLimitsService,
   setLimitService,
   deleteLimitService,
+  deleteCardService,
 } from '../services/cardService.js';
 import { success, failure } from '../utils/response.js';
 import { logger }           from '../utils/logger.js';
+import { findCustomerByUserId } from '../db/queries/customerQueries.js';
+import { findAccountById }      from '../db/queries/accountQueries.js';
 
 const getMeta = (req) => ({
   actorId  : req.user?.id   ?? null,
@@ -83,18 +86,25 @@ const handleErr = (err, res) => {
 // POST /api/accounts/:accountId/cards
 export const issueCard = async (req, res) => {
   try {
-    const { cardType, network } = req.body;
+    const { cardType, network, customPan, lastFour, expiryMonth, expiryYear } = req.body;
     const card = await issueCardService(
-      { accountId: req.params.accountId, cardType, network },
+      { accountId: req.params.accountId, cardType, network, customPan, lastFour, expiryMonth, expiryYear },
       getMeta(req)
     );
-    return success(res, { card }, 'Card issued successfully.', 201);
+    return success(res, { card }, 'Card linked successfully.', 201);
   } catch (err) { return handleErr(err, res); }
 };
 
 // GET /api/accounts/:accountId/cards
 export const listCards = async (req, res) => {
   try {
+    if (req.user?.role === 'customer') {
+      const cust = await findCustomerByUserId(req.user.id);
+      const acct = await findAccountById(req.params.accountId);
+      if (!cust || !acct || acct.customer_id !== cust.id) {
+        return failure(res, 'Account not found.', 404);
+      }
+    }
     const includeInactive = req.query.includeInactive === 'true';
     const cards = await listCardsService(req.params.accountId, includeInactive);
     return success(res, { cards }, 'Cards retrieved.');
@@ -182,4 +192,16 @@ export const deleteLimit = async (req, res) => {
 export default {
   issueCard, listCards, getCard, blockCard, unblockCard,
   reportLost, reportStolen, replaceCard, listLimits, setLimit, deleteLimit,
+};
+
+// DELETE /api/cards/:id
+export const deleteCard = async (req, res) => {
+  try {
+    const meta = getMeta(req);
+    if (req.user?.role === 'customer') {
+      meta.customerUserId = req.user.id;
+    }
+    const card = await deleteCardService(req.params.id, meta);
+    return success(res, { card }, 'Card removed successfully.');
+  } catch (err) { return handleErr(err, res); }
 };
