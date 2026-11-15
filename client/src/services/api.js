@@ -16,8 +16,12 @@ import axios from 'axios';
 import tokenStore from './tokenStore';
 
 // ── Instance ──────────────────────────────────────────────────────────────────
+// In dev: Vite proxy forwards /api → http://localhost:5000
+// In production (Vercel): vercel.json rewrites /api → Render backend URL
+const BASE_URL = import.meta.env.VITE_API_URL || '/api';
+
 export const api = axios.create({
-  baseURL : '/api',
+  baseURL : BASE_URL,
   timeout : 15_000,
   headers : { 'Content-Type': 'application/json' },
 });
