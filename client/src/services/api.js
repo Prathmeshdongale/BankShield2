@@ -16,11 +16,10 @@ import axios from 'axios';
 import tokenStore from './tokenStore';
 
 // ── Instance ──────────────────────────────────────────────────────────────────
-// In dev: Vite proxy forwards /api → http://localhost:5000
-// In production: direct connection to Render backend
-const PROD_API_URL = 'https://bankshield-api-5m3j.onrender.com/api';
+// Dev:  Vite proxy forwards /api → http://localhost:5000
+// Prod: Direct to Render backend (hardcoded, no env var dependency)
 const BASE_URL = import.meta.env.PROD
-  ? (import.meta.env.VITE_API_URL || PROD_API_URL)
+  ? 'https://bankshield-api-5m3j.onrender.com/api'
   : '/api';
 
 export const api = axios.create({
