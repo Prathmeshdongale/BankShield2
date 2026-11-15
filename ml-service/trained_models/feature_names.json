@@ -16,5 +16,8 @@
   "is_new_beneficiary",
   "card_type_encoded",
   "channel_encoded",
-  "amount"
+  "amount",
+  "degree_out_7d",
+  "fan_out_1h",
+  "round_trip_flag"
 ]

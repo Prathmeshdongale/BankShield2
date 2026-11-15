@@ -38,6 +38,18 @@ import {
 } from '../db/queries/fraudQueries.js';
 import { updateTransactionStatus }     from '../db/queries/transactionQueries.js';
 
+// SSE broadcast — imported lazily to avoid circular deps at startup
+let _broadcastFraudAlert = null;
+const getBroadcast = async () => {
+  if (!_broadcastFraudAlert) {
+    try {
+      const mod = await import('../routes/fraudRoutes.js');
+      _broadcastFraudAlert = mod.broadcastFraudAlert;
+    } catch { _broadcastFraudAlert = () => {}; }
+  }
+  return _broadcastFraudAlert;
+};
+
 // ── Risk thresholds ───────────────────────────────────────────────────────────
 const BLOCK_THRESHOLD  = parseFloat(process.env.FRAUD_BLOCK_THRESHOLD  ?? '80');   // 0–100 scale
 const FLAG_THRESHOLD   = parseFloat(process.env.FRAUD_FLAG_THRESHOLD   ?? '30');   // 0–100 scale
@@ -156,6 +168,15 @@ export const evaluateTransactionRisk = async (txn, context = {}, client = null) 
         `[fraudEngine] Fraud alert created  id=${alertId}  ` +
         `txn=${txn.transaction_ref}  severity=${severity}  score=${riskScore100}`
       );
+      // ── Broadcast to connected SSE clients (fire-and-forget) ─────────────
+      getBroadcast().then(broadcast => broadcast({
+        id        : alertId,
+        severity,
+        riskScore : riskScore100,
+        txnRef    : txn.transaction_ref,
+        amount    : txn.amount,
+        createdAt : new Date().toISOString(),
+      })).catch(() => {});
     } catch (err) {
       logger.warn(`[fraudEngine] fraud_alerts insert failed: ${err.message}`);
     }

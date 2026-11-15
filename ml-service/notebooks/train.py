@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """
 notebooks/train.py — BankShield XGBoost Fraud Detector Training Script
 =======================================================================
@@ -5,6 +6,70 @@ notebooks/train.py — BankShield XGBoost Fraud Detector Training Script
 Generates a realistic synthetic banking fraud dataset, trains an XGBoost
 classifier, handles class imbalance, tunes the decision threshold, reports
 full metrics, and saves artefacts to trained_models/.
+
+HOW TO RUN
+----------
+From the ml-service directory with the venv activated:
+
+    cd d:\\B Tech\\bankshield\\ml-service
+    .\\venv\\Scripts\\activate          # Windows
+    # source venv/bin/activate         # Linux / macOS
+
+    # Default run (f2 threshold — recall-weighted, 21 features including graph signals)
+    python notebooks/train.py
+
+Optional flags:
+    python notebooks/train.py --samples 150000        # more samples (default: 100000)
+    python notebooks/train.py --fraud-rate 0.025      # higher fraud rate for better recall
+    python notebooks/train.py --threshold-strategy f2 # recall-weighted (default)
+    python notebooks/train.py --output trained_models/xgboost_fraud_model.joblib
+
+The script also saves to saved_models/ (FastAPI inference path) unless --no-copy is passed.
+
+OUTPUT FILES
+------------
+trained_models/
+    xgboost_fraud_model.joblib     — XGBoost pipeline (preprocessor + classifier)
+    feature_names.json             — ordered feature list for inference
+    threshold.json                 — optimal decision threshold
+    training_metrics.json          — all metrics from the run
+saved_models/
+    xgboost_fraud_model.joblib     — copy used by FastAPI inference service
+
+DATASET: Synthetic Banking Fraud
+---------------------------------
+21 engineered features (18 original + 3 graph/network signals):
+
+  Temporal
+    hour_of_day          0–23
+    day_of_week          0 = Mon … 6 = Sun
+    is_weekend           bool
+    is_night             bool (23:00–04:59)
+
+  Amount-based
+    amount               log-normal, heavy tail
+    amount_log           log1p(amount)
+    balance_ratio        amount / (account_balance + 1) — high ratio = risky
+    amount_zscore        (amount - account_mean_txn) / (account_std_txn + 1)
+
+  Velocity (rolling windows)
+    velocity_1h          transactions in last 1 hour from same account
+    velocity_24h         transactions in last 24 hours
+    amount_sum_1h        total spend in last 1 hour
+    distinct_merchants_24h  unique merchants in last 24 hours
+
+  Behavioural / context
+    merchant_category_risk  encoded: 0=low 1=med 2=high (travel, crypto, etc.)
+    country_mismatch     1 if txn country ≠ account home country
+    is_new_device        1 if device fingerprint not seen in last 30 days
+    is_new_beneficiary   1 if destination account is new (never received before)
+    card_type_encoded    0=debit 1=credit 2=prepaid 3=virtual
+    channel_encoded      0=web 1=mobile 2=atm 3=pos 4=upi 5=neft 6=branch
+
+  Graph / network signals (NEW — indices 18–20)
+    degree_out_7d        unique destination accounts in last 7 days
+    fan_out_1h           unique destination accounts in last 1 hour
+    round_trip_flag      1 if A→B→A money flow pattern detected in last 24h
 
 HOW TO RUN
 ----------
@@ -130,6 +195,9 @@ FEATURE_NAMES = [
     "card_type_encoded",     # 15
     "channel_encoded",       # 16
     "amount",                # 17  (kept raw for tree splits on large amounts)
+    "degree_out_7d",         # 18  graph: unique destinations in last 7 days
+    "fan_out_1h",            # 19  graph: unique destinations in last 1 hour
+    "round_trip_flag",       # 20  graph: A→B→A pattern in last 24h
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -247,6 +315,21 @@ def generate_dataset(n_samples: int = 100_000, fraud_rate: float = 0.018, seed: 
     actual_rate = label.mean()
     print(f"[data] Generated {N:,} transactions — {label.sum():,} fraud ({actual_rate*100:.2f}%)")
 
+    # ── Graph / network features (simulated) ─────────────────────────────────
+    # degree_out_7d: Poisson(5) for legit, Poisson(15) for fraud (mule pattern)
+    degree_out_7d = rng.poisson(5, N).astype(np.float32)
+    degree_out_7d[fraud_idx] = rng.poisson(18, fraud_idx.sum()).astype(np.float32)
+    degree_out_7d = np.clip(degree_out_7d, 0, 50).astype(np.float32)
+
+    # fan_out_1h: burst sending to many accounts in 1h (strong fraud signal)
+    fan_out_1h = rng.poisson(0.5, N).astype(np.float32)
+    fan_out_1h[fraud_idx] = rng.poisson(4.0, fraud_idx.sum()).astype(np.float32)
+    fan_out_1h = np.clip(fan_out_1h, 0, 20).astype(np.float32)
+
+    # round_trip_flag: 2% of legit txns happen to have roundtrips, 25% of fraud
+    round_trip_flag = rng.binomial(1, 0.02, N).astype(np.float32)
+    round_trip_flag[fraud_idx] = rng.binomial(1, 0.25, fraud_idx.sum()).astype(np.float32)
+
     df = pd.DataFrame({
         "amount_log"            : amount_log,
         "hour_of_day"           : hour.astype(np.float32),
@@ -266,6 +349,9 @@ def generate_dataset(n_samples: int = 100_000, fraud_rate: float = 0.018, seed: 
         "card_type_encoded"     : card_type,
         "channel_encoded"       : channel,
         "amount"                : amount_legit,
+        "degree_out_7d"         : degree_out_7d,
+        "fan_out_1h"            : fan_out_1h,
+        "round_trip_flag"       : round_trip_flag,
         "label"                 : label,
     })
     return df
@@ -427,9 +513,9 @@ def print_feature_importance(model, feature_names, top_n=10):
 
 def train(
     n_samples    : int   = 100_000,
-    fraud_rate   : float = 0.018,
+    fraud_rate   : float = 0.025,
     output_path  : str   = None,
-    threshold_strategy: str = "f1",
+    threshold_strategy: str = "f2",
     run_cv       : bool  = True,
     copy_to_saved: bool  = True,
 ):
@@ -583,13 +669,13 @@ def main():
     )
     parser.add_argument("--samples",    type=int,   default=100_000,
                         help="Number of synthetic transactions (default: 100000)")
-    parser.add_argument("--fraud-rate", type=float, default=0.018,
-                        help="Target fraud rate 0–1 (default: 0.018 = 1.8%%)")
+    parser.add_argument("--fraud-rate", type=float, default=0.025,
+                        help="Target fraud rate 0–1 (default: 0.025 = 2.5%% — higher for better recall training)")
     parser.add_argument("--output",     type=str,   default=None,
                         help="Output .joblib path (default: trained_models/xgboost_fraud_model.joblib)")
-    parser.add_argument("--threshold-strategy", type=str, default="f1",
+    parser.add_argument("--threshold-strategy", type=str, default="f2",
                         choices=["f1","f2","precision_at_recall_80","youden"],
-                        help="Threshold optimisation strategy (default: f1)")
+                        help="Threshold optimisation strategy (default: f2 — recall-weighted)")
     parser.add_argument("--no-cv",     action="store_true",
                         help="Skip 5-fold cross-validation (faster)")
     parser.add_argument("--no-copy",   action="store_true",

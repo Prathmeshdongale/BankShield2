@@ -113,6 +113,61 @@ export const getLastSeenDeviceAndCountry = async (accountId, client = null) => {
   return rows[0] ?? null;
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// GRAPH / NETWORK FEATURE QUERIES
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Count distinct destination accounts this account has sent money to in the
+ * last 7 days.  High fan-out indicates potential mule distribution behaviour.
+ */
+export const getDegreeOut7d = async (accountId, client = null) => {
+  const { rows } = await run(client, `
+    SELECT COUNT(DISTINCT destination_account_id) AS cnt
+    FROM   transactions
+    WHERE  source_account_id = $1
+      AND  destination_account_id IS NOT NULL
+      AND  status NOT IN ('failed','reversed','blocked')
+      AND  created_at >= NOW() - INTERVAL '7 days';
+  `, [accountId]);
+  return parseInt(rows[0].cnt, 10);
+};
+
+/**
+ * Count distinct destination accounts this account has sent money to in the
+ * last 1 hour.  Sudden burst to many new recipients is a strong fraud signal.
+ */
+export const getFanOut1h = async (accountId, client = null) => {
+  const { rows } = await run(client, `
+    SELECT COUNT(DISTINCT destination_account_id) AS cnt
+    FROM   transactions
+    WHERE  source_account_id = $1
+      AND  destination_account_id IS NOT NULL
+      AND  status NOT IN ('failed','reversed','blocked')
+      AND  created_at >= NOW() - INTERVAL '1 hour';
+  `, [accountId]);
+  return parseInt(rows[0].cnt, 10);
+};
+
+/**
+ * Detect round-trip pattern: A sent money to B, and B has since sent money
+ * back to A within the last 24 hours.  Classic smurfing / layering signal.
+ * Returns 1 if a round-trip exists, 0 otherwise.
+ */
+export const getRoundTripFlag = async (accountId, destinationAccountId, client = null) => {
+  if (!destinationAccountId) return 0;
+  const { rows } = await run(client, `
+    SELECT 1 AS hit
+    FROM   transactions
+    WHERE  source_account_id      = $1
+      AND  destination_account_id = $2
+      AND  status NOT IN ('failed','reversed','blocked')
+      AND  created_at >= NOW() - INTERVAL '24 hours'
+    LIMIT  1;
+  `, [destinationAccountId, accountId]);   // reversed: B→A
+  return rows.length > 0 ? 1 : 0;
+};
+
 /** Get all distinct device fingerprints seen on this account in last 30 days. */
 export const getKnownDevices = async (accountId, client = null) => {
   const { rows } = await run(client, `

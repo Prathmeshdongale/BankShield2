@@ -36,6 +36,7 @@ import { Router }       from 'express';
 import { authenticate, authorize } from '../middleware/authenticate.js';
 import { checkMlHealth } from '../services/mlClient.js';
 import { success }       from '../utils/response.js';
+import { query }         from '../db/connection.js';
 import {
   validate,
   listAlertsValidator,
@@ -72,6 +73,63 @@ router.use(authenticate);
 router.get('/ml-status', authorize('fraud:view_ml'), async (_req, res) => {
   const status = await checkMlHealth();
   return success(res, status, 'ML Service Health');
+});
+
+// ── ML metrics — live prediction stats from DB ────────────────────────────────
+// GET /api/fraud/ml-metrics
+// Returns: total predictions, blocked count, avg inference ms, weekly fraud rate trend.
+router.get('/ml-metrics', authorize('fraud:view_ml'), async (_req, res) => {
+  try {
+    const { rows } = await query(`
+      SELECT
+        COUNT(*)                                             AS total_predictions,
+        SUM(CASE WHEN is_fraud THEN 1 ELSE 0 END)           AS total_blocked,
+        ROUND(AVG(inference_ms)::numeric, 1)                AS avg_inference_ms,
+        ROUND(AVG(risk_score)::numeric, 4)                  AS avg_risk_score,
+        MAX(created_at)                                      AS last_prediction_at,
+        COUNT(CASE WHEN created_at >= NOW() - INTERVAL '24 hours' THEN 1 END) AS predictions_24h,
+        COUNT(CASE WHEN is_fraud AND created_at >= NOW() - INTERVAL '24 hours' THEN 1 END) AS blocked_24h
+      FROM fraud_predictions;
+    `);
+    return success(res, rows[0] ?? {}, 'ML Metrics');
+  } catch (err) {
+    return success(res, {}, 'ML Metrics (no data yet)');
+  }
+});
+
+// ── Real-time alert stream (Server-Sent Events) ───────────────────────────────
+// GET /api/fraud/alerts/stream
+// Streams new fraud alerts to connected analyst dashboards in real-time.
+// Clients: FraudAlerts.jsx and FraudAnalystDashboard.jsx via EventSource.
+const sseClients = new Set();
+
+export const broadcastFraudAlert = (alert) => {
+  const payload = `data: ${JSON.stringify(alert)}\n\n`;
+  for (const client of sseClients) {
+    try { client.write(payload); } catch { sseClients.delete(client); }
+  }
+};
+
+router.get('/alerts/stream', authenticate, authorize('fraud:read_alerts'), (req, res) => {
+  res.setHeader('Content-Type',  'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection',    'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders();
+
+  // Send a heartbeat immediately so the client knows the stream is alive
+  res.write(': heartbeat\n\n');
+  sseClients.add(res);
+
+  // Send a keep-alive ping every 25 seconds to prevent proxy timeouts
+  const ping = setInterval(() => {
+    try { res.write(': ping\n\n'); } catch { clearInterval(ping); }
+  }, 25_000);
+
+  req.on('close', () => {
+    clearInterval(ping);
+    sseClients.delete(res);
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

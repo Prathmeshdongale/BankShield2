@@ -1,10 +1,12 @@
 /**
  * FraudAlerts.jsx — /fraud/alerts
  * Paginated alert queue with filters, risk badges, and slide-out detail drawer.
+ * Includes real-time SSE subscription for instant new-alert notifications.
  */
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useSearchParams, Link } from 'react-router-dom';
-import { ShieldAlert, RefreshCw, FileSearch } from 'lucide-react';
+import { ShieldAlert, RefreshCw, FileSearch, Bell } from 'lucide-react';
+import toast                     from 'react-hot-toast';
 import { fraudService }   from '@/services/fraudService';
 import { RiskBadge }      from '@/components/fraud/RiskBadge';
 import { StatusBadge }    from '@/components/ui/StatusBadge';
@@ -34,6 +36,8 @@ export const FraudAlerts = () => {
   const [severity,   setSeverity]   = useState(sp.get('severity') ?? '');
   const [page,       setPage]       = useState(parseInt(sp.get('page') ?? '1', 10));
   const [selectedId, setSelectedId] = useState(null);
+  const [newAlertCount, setNewAlertCount] = useState(0);
+  const sseRef = useRef(null);
 
   const load = useCallback(async (pg = page) => {
     setLoading(true); setError('');
@@ -45,12 +49,39 @@ export const FraudAlerts = () => {
       });
       setAlerts(res.data?.data ?? []);
       setPagination(res.data?.pagination ?? null);
+      setNewAlertCount(0);
     } catch (e) {
       setError(e?.response?.data?.error ?? 'Failed to load alerts.');
     } finally { setLoading(false); }
   }, [status, severity, page]);
 
   useEffect(() => { load(page); }, [status, severity, page]); // eslint-disable-line
+
+  // ── SSE: real-time new alert subscription ──────────────────────────────────
+  useEffect(() => {
+    const token = localStorage.getItem('accessToken') || sessionStorage.getItem('accessToken') || '';
+    const url   = `/api/fraud/alerts/stream`;
+    const es    = new EventSource(url, { withCredentials: true });
+    sseRef.current = es;
+
+    es.onmessage = (event) => {
+      try {
+        const alert = JSON.parse(event.data);
+        setNewAlertCount(c => c + 1);
+        const severityLabel = alert.severity?.toUpperCase() ?? 'NEW';
+        toast(`🚨 ${severityLabel} alert — ₹${Number(alert.amount || 0).toLocaleString('en-IN')}`, {
+          duration: 6000,
+          style: { background: alert.severity === 'critical' ? '#7f1d1d' : '#78350f', color: '#fff' },
+        });
+      } catch { /* ignore malformed events */ }
+    };
+
+    es.onerror = () => {
+      // Connection dropped — EventSource auto-reconnects, no action needed
+    };
+
+    return () => { es.close(); sseRef.current = null; };
+  }, []);
 
   const changePage = p => {
     setPage(p);
@@ -70,6 +101,14 @@ export const FraudAlerts = () => {
           </p>
         </div>
         <div className="flex gap-2">
+          {newAlertCount > 0 && (
+            <Button variant="outline" size="sm"
+              onClick={() => load(1)}
+              className="gap-1.5 border-amber-400 text-amber-700 dark:text-amber-400 animate-pulse">
+              <Bell className="h-3.5 w-3.5" />
+              {newAlertCount} new alert{newAlertCount > 1 ? 's' : ''}
+            </Button>
+          )}
           <Link to="/fraud/investigations">
             <Button variant="outline" size="sm" className="gap-1.5">
               <FileSearch className="h-3.5 w-3.5" /> Investigations

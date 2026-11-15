@@ -21,6 +21,11 @@ const SystemSettings = () => {
     version: 'xgboost-v2.0',
     modelLoaded: false,
     circuitOpen: false,
+    totalPredictions: null,
+    blockedCount: null,
+    avgInferenceMs: null,
+    predictions24h: null,
+    blocked24h: null,
   });
   const [systemHealth, setSystemHealth] = useState({
     backend: 'healthy',
@@ -33,15 +38,30 @@ const SystemSettings = () => {
     try {
       const mlRes = await fraudService.mlStatus();
       const data = mlRes.data || mlRes;
-      setMlInfo({
+      setMlInfo(prev => ({
+        ...prev,
         status: data.status || (data.model_loaded ? 'online' : 'fallback'),
         version: data.model_version || 'xgboost-v2.0',
         modelLoaded: Boolean(data.model_loaded),
         circuitOpen: Boolean(data.circuit_open),
-      });
+      }));
     } catch {
       setMlInfo(prev => ({ ...prev, status: 'fallback', circuitOpen: true }));
     }
+
+    // Fetch live ML prediction metrics from the DB
+    try {
+      const metricsRes = await fraudService.mlMetrics();
+      const m = metricsRes.data || metricsRes;
+      setMlInfo(prev => ({
+        ...prev,
+        totalPredictions: m.total_predictions ?? null,
+        blockedCount    : m.total_blocked     ?? null,
+        avgInferenceMs  : m.avg_inference_ms  ?? null,
+        predictions24h  : m.predictions_24h   ?? null,
+        blocked24h      : m.blocked_24h       ?? null,
+      }));
+    } catch { /* metrics not critical */ }
 
     try {
       await api.get('/health');
@@ -101,6 +121,23 @@ const SystemSettings = () => {
             </div>
             <Switch checked={mlAutoUpdate} onCheckedChange={setMlAutoUpdate} />
           </div>
+
+          {/* Live prediction stats */}
+          {(mlInfo.totalPredictions !== null) && (
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-1">
+              {[
+                { label: 'Total Predictions',  value: Number(mlInfo.totalPredictions).toLocaleString() },
+                { label: 'Total Blocked',       value: Number(mlInfo.blockedCount).toLocaleString() },
+                { label: 'Avg Inference',        value: `${mlInfo.avgInferenceMs ?? '—'} ms` },
+                { label: 'Blocked (24h)',         value: Number(mlInfo.blocked24h).toLocaleString() },
+              ].map(({ label, value }) => (
+                <div key={label} className="p-3 bg-white dark:bg-slate-800 border border-gray-100 dark:border-gray-700 rounded-lg">
+                  <div className="text-xs text-gray-500 dark:text-gray-400">{label}</div>
+                  <div className="text-lg font-bold text-gray-900 dark:text-white mt-0.5">{value}</div>
+                </div>
+              ))}
+            </div>
+          )}
         </CardContent>
       </Card>
 

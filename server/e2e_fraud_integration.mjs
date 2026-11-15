@@ -30,35 +30,58 @@ const chk = (label, ok, got) => {
 };
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-// ── pre-flight: restore known password ────────────────────────────────────────
-for (const pw of ['BankShield@Super2025!', 'BankShield@Reset2025!', 'BankShield@New2025!']) {
-  const r = await fetch(`${BASE}/auth/login`, {
+/**
+ * Two-step login: POST /auth/login → get devOtp → POST /auth/verify-otp → accessToken.
+ * Works for any role in NODE_ENV=development where devOtp is returned.
+ */
+const loginTwoStep = async (email, password) => {
+  const step1 = await fetch(`${BASE}/auth/login`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: j({ email: 'superadmin@bankshield.internal', password: pw }),
+    body: j({ email, password }),
   });
-  if (r.status === 200) {
-    const d = await r.json();
-    if (pw !== 'BankShield@Super2025!') {
-      await fetch(`${BASE}/auth/change-password`, {
-        method: 'POST', headers: hdr(d.data.accessToken),
-        body: j({ currentPassword: pw, newPassword: 'BankShield@Super2025!', confirmPassword: 'BankShield@Super2025!' }),
-      });
-      console.log('  [pre-flight] Password restored.\n');
-    }
-    break;
+  const d1 = await step1.json().catch(() => ({}));
+  if (step1.status !== 200) {
+    console.error(`  [auth] Step 1 failed ${step1.status}:`, JSON.stringify(d1).slice(0,200));
+    return null;
   }
-}
+  const devOtp = d1.data?.devOtp;
+  if (!devOtp) {
+    console.error('  [auth] No devOtp in response — is NODE_ENV=development?', d1.data);
+    return null;
+  }
+  const step2 = await fetch(`${BASE}/auth/verify-otp`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: j({ email, otp: devOtp }),
+  });
+  const d2 = await step2.json().catch(() => ({}));
+  if (step2.status !== 200) {
+    console.error(`  [auth] Step 2 failed ${step2.status}:`, JSON.stringify(d2).slice(0,200));
+    return null;
+  }
+  return d2.data?.accessToken ?? null;
+};
 
-// Login as super-admin
-const loginRes = await fetch(`${BASE}/auth/login`, {
-  method: 'POST', headers: { 'Content-Type': 'application/json' },
-  body: j({ email: 'superadmin@bankshield.internal', password: 'BankShield@Super2025!' }),
-});
-const AT = (await loginRes.json()).data?.accessToken;
-if (!AT) { console.error('Cannot authenticate — abort.'); process.exit(1); }
+// Login as super-admin (two-step: password + OTP)
+const AT = await loginTwoStep('superadmin@bankshield.internal', 'BankShield@Super2025!');
+if (!AT) { console.error('Cannot authenticate super-admin — abort.'); process.exit(1); }
 
-// ── Setup: user + customer + two accounts ─────────────────────────────────────
+// ── Setup: register a branch_manager user for banking operations ─────────────
+// Super Admin is restricted from banking routes (privacy boundary), so we need
+// a branch_manager token for all customer/account/transaction calls.
 const TS = Date.now();
+const bmEmail = `e2e.bm.${TS}@bankshield.test`;
+const bmPw   = 'E2eBranchMgr@1234!';
+
+const regBm = await api('POST', '/auth/register', {
+  email: bmEmail, password: bmPw,
+  firstName: 'Branch', lastName: 'Manager', roleName: 'branch_manager',
+}, AT);
+if (!regBm.b?.data?.user?.id) { console.error('Branch manager registration failed:', JSON.stringify(regBm.b).slice(0,200)); process.exit(1); }
+
+const BT = await loginTwoStep(bmEmail, bmPw);
+if (!BT) { console.error('Cannot authenticate branch manager — abort.'); process.exit(1); }
+
+// ── Register a customer user and create their profile + accounts ─────────────
 const regU = await api('POST', '/auth/register', {
   email: `e2e.${TS}@bankshield.test`, password: 'E2eTest@1234!',
   firstName: 'Ethan', lastName: 'Test', roleName: 'customer',
@@ -66,19 +89,20 @@ const regU = await api('POST', '/auth/register', {
 const UID = regU.b?.data?.user?.id;
 if (!UID) { console.error('User registration failed:', JSON.stringify(regU.b).slice(0,200)); process.exit(1); }
 
-const custRes = await api('POST', '/customers', { userId: UID, segment: 'retail', riskRating: 'low' }, AT);
+// Use branch_manager token for banking operations
+const custRes = await api('POST', '/customers', { userId: UID, segment: 'retail', riskRating: 'low' }, BT);
 const CID = custRes.b?.data?.customer?.id;
 
-const acc1Res = await api('POST', '/accounts', { customerId: CID, accountType: 'savings' }, AT);
+const acc1Res = await api('POST', '/accounts', { customerId: CID, accountType: 'savings' }, BT);
 const ACC1 = acc1Res.b?.data?.account?.id;
 
-const acc2Res = await api('POST', '/accounts', { customerId: CID, accountType: 'current' }, AT);
+const acc2Res = await api('POST', '/accounts', { customerId: CID, accountType: 'current' }, BT);
 const ACC2 = acc2Res.b?.data?.account?.id;
 
-if (!ACC1 || !ACC2) { console.error('Account creation failed'); process.exit(1); }
+if (!ACC1 || !ACC2) { console.error('Account creation failed:', JSON.stringify(acc1Res.b).slice(0,200), JSON.stringify(acc2Res.b).slice(0,200)); process.exit(1); }
 
-// Fund ACC1 with ₹50,000 via a raw deposit
-await api('POST', '/transactions/deposit', { accountId: ACC1, amount: 50000, channel: 'branch' }, AT);
+// Fund ACC1 with ₹50,000 via a raw deposit (branch_manager)
+await api('POST', '/transactions/deposit', { accountId: ACC1, amount: 50000, channel: 'branch' }, BT);
 console.log(`Setup complete — ACC1=${ACC1.slice(0,8)}…  ACC2=${ACC2.slice(0,8)}…\n`);
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -94,7 +118,7 @@ console.log('══════════════════════�
   chk('HTTP 200',                s === 200,                      s);
   chk('status = ok',             b.data?.status === 'ok',        b.data?.status);
   chk('model_loaded = true',     b.data?.model_loaded === true,  b.data?.model_loaded);
-  chk('model_features = 18',     b.data?.model_features === 18,  b.data?.model_features);
+  chk('model_features = 21',     b.data?.model_features === 21,  b.data?.model_features);
   console.log(`     model=${b.data?.model_version}  threshold=${b.data?.threshold}  latency<200ms`);
 }
 
@@ -103,7 +127,7 @@ console.log('══════════════════════�
   console.log('\n2. Low-risk branch deposit — fraud object in response');
   const { s, b } = await api('POST', '/transactions/deposit', {
     accountId: ACC1, amount: 150, channel: 'branch', description: 'salary credit',
-  }, AT);
+  }, BT);
   chk('HTTP 201',                s === 201,                          s);
   chk('transaction_ref TXN-…',  b.data?.transaction?.transaction_ref?.startsWith('TXN-'),
                                                                      b.data?.transaction?.transaction_ref);
@@ -124,7 +148,7 @@ console.log('══════════════════════�
   const { s, b } = await api('POST', '/transactions/transfer', {
     sourceAccountId: ACC1, destinationAccountId: ACC2,
     amount: 45000, channel: 'web', description: 'large suspicious transfer',
-  }, AT);
+  }, BT);
   chk('HTTP 201',                s === 201,                    s);
   chk('committed to DB',         !!b.data?.transaction?.id,   b.data?.transaction?.id);
   const f = b.data?.fraud;
@@ -142,7 +166,7 @@ console.log('══════════════════════�
   console.log('\n4. fraud_predictions persisted — transaction has risk_score set');
   // Give the async post-commit pipeline a moment to complete
   await sleep(1500);
-  const { s, b } = await api('GET', `/transactions?accountId=${ACC1}&limit=10`, null, AT);
+  const { s, b } = await api('GET', `/transactions?accountId=${ACC1}&limit=10`, null, BT);
   chk('HTTP 200', s === 200, s);
   const txns = b.data?.data ?? [];
   chk('transactions returned',          txns.length > 0,                           txns.length);
@@ -163,11 +187,11 @@ console.log('══════════════════════�
   // Trigger a transaction designed to score in MEDIUM+ range
   // (velocity burst: deposit 4 times rapidly, which inflates velocity_1h)
   for (let i = 0; i < 3; i++) {
-    await api('POST', '/transactions/deposit', { accountId: ACC1, amount: 100, channel: 'api' }, AT);
+    await api('POST', '/transactions/deposit', { accountId: ACC1, amount: 100, channel: 'api' }, BT);
   }
   const { s, b } = await api('POST', '/transactions/deposit', {
     accountId: ACC1, amount: 500, channel: 'api', description: 'velocity burst test',
-  }, AT);
+  }, BT);
   chk('HTTP 201 (velocity burst)',    s === 201, s);
   const f = b.data?.fraud;
   if (f) {
@@ -186,7 +210,7 @@ console.log('══════════════════════�
   console.log('\n6. Fraud response schema — all required fields present');
   const { s, b } = await api('POST', '/transactions/deposit', {
     accountId: ACC1, amount: 25, channel: 'branch',
-  }, AT);
+  }, BT);
   chk('HTTP 201', s === 201, s);
   const f = b.data?.fraud;
   for (const field of ['riskScore', 'riskLevel', 'decision', 'isFraud', 'flag', 'finalStatus', 'is_fallback']) {
@@ -200,7 +224,7 @@ console.log('══════════════════════�
   const { s, b } = await api('POST', '/transactions/upi', {
     sourceAccountId: ACC2, destinationAccountId: ACC1,
     amount: 200, upiVpa: 'test@upi',
-  }, AT);
+  }, BT);
   chk('HTTP 201',              s === 201,                     s);
   chk('channel = upi',         b.data?.transaction?.channel === 'upi', b.data?.transaction?.channel);
   chk('fraud field present',   'fraud' in (b.data ?? {}),    Object.keys(b.data ?? {}));
@@ -213,7 +237,7 @@ console.log('══════════════════════�
   console.log('\n8. Fallback heuristic — is_fallback reflects model used');
   const { s, b } = await api('POST', '/transactions/deposit', {
     accountId: ACC1, amount: 1, channel: 'api',
-  }, AT);
+  }, BT);
   chk('HTTP 201', s === 201, s);
   const f = b.data?.fraud;
   if (f) {
@@ -227,12 +251,12 @@ console.log('══════════════════════�
 {
   console.log('\n9. ATM withdrawal (card required)');
   // Issue a card on ACC1 first (re-activate ACC1 if needed)
-  const cardRes = await api('POST', `/accounts/${ACC1}/cards`, { cardType: 'debit', network: 'rupay' }, AT);
+  const cardRes = await api('POST', `/accounts/${ACC1}/cards`, { cardType: 'debit', network: 'rupay' }, BT);
   const CARD_ID = cardRes.b?.data?.card?.id;
   if (CARD_ID) {
     const { s, b } = await api('POST', '/transactions/atm', {
       accountId: ACC1, cardId: CARD_ID, amount: 500, locationCity: 'Mumbai',
-    }, AT);
+    }, BT);
     chk('ATM withdrawal 201',   s === 201,                        s);
     chk('channel = atm',        b.data?.transaction?.channel === 'atm', b.data?.transaction?.channel);
     const f = b.data?.fraud;
@@ -249,10 +273,10 @@ console.log('══════════════════════�
   const key = crypto.randomUUID();
   const r1 = await api('POST', '/transactions/deposit', {
     accountId: ACC1, amount: 10, channel: 'api', idempotencyKey: key,
-  }, AT);
+  }, BT);
   const r2 = await api('POST', '/transactions/deposit', {
     accountId: ACC1, amount: 10, channel: 'api', idempotencyKey: key,
-  }, AT);
+  }, BT);
   chk('First call  → 201',       r1.s === 201,                    r1.s);
   chk('Replay      → 200',       r2.s === 200,                    r2.s);
   chk('duplicate = true',        r2.b.data?.duplicate === true,   r2.b.data?.duplicate);
@@ -265,14 +289,14 @@ console.log('══════════════════════�
 // ── 11. Frozen account rejected pre-ML ───────────────────────────────────────
 {
   console.log('\n11. Frozen account rejected before ML scoring (no wasted ML call)');
-  await api('PATCH', `/accounts/${ACC2}/freeze`, null, AT);
+  await api('PATCH', `/accounts/${ACC2}/freeze`, null, BT);
   const { s, b } = await api('POST', '/transactions/transfer', {
     sourceAccountId: ACC1, destinationAccountId: ACC2, amount: 100, channel: 'web',
-  }, AT);
+  }, BT);
   chk('HTTP 409 (account frozen)',  s === 409,                              s);
   chk('no fraud field on 4xx',      b.data?.fraud === undefined,             b.data);
   // Unfreeze for subsequent tests
-  await api('PATCH', `/accounts/${ACC2}/activate`, null, AT);
+  await api('PATCH', `/accounts/${ACC2}/activate`, null, BT);
 }
 
 // ── 12. Insufficient funds — no ML call ───────────────────────────────────────
@@ -280,7 +304,7 @@ console.log('══════════════════════�
   console.log('\n12. Insufficient funds rejected before ML scoring');
   const { s, b } = await api('POST', '/transactions/withdraw', {
     accountId: ACC1, amount: 999999, channel: 'branch',
-  }, AT);
+  }, BT);
   chk('HTTP 422',                   s === 422,                   s);
   chk('INSUFFICIENT_FUNDS message', b.error?.includes('funds'),  b.error);
 }
@@ -291,7 +315,7 @@ console.log('══════════════════════�
   const { s, b } = await api('POST', '/transactions/deposit', {
     accountId: ACC1, amount: 1200, channel: 'web',
     description: 'shap verification test',
-  }, AT);
+  }, BT);
   chk('HTTP 201', s === 201, s);
   const f = b.data?.fraud;
   chk('fraud object present', f != null, f);

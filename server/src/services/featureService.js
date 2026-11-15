@@ -25,6 +25,9 @@ import {
   getAccountTxnStats,
   getKnownDevices,
   getLastSeenDeviceAndCountry,
+  getDegreeOut7d,
+  getFanOut1h,
+  getRoundTripFlag,
 } from '../db/queries/fraudQueries.js';
 import { getAccountBalance } from '../db/queries/accountQueries.js';
 
@@ -74,6 +77,9 @@ export const buildFeatureVector = async (txn, meta = {}) => {
     balanceRow,
     knownDevices,
     lastSeen,
+    degreeOut7d,
+    fanOut1h,
+    roundTripFlag,
   ] = await Promise.all([
     countRecentTransactions(accountId, 60),
     countRecentTransactions(accountId, 1440),
@@ -83,11 +89,14 @@ export const buildFeatureVector = async (txn, meta = {}) => {
     getAccountBalance(accountId),
     deviceFp ? getKnownDevices(accountId) : Promise.resolve(new Set()),
     getLastSeenDeviceAndCountry(accountId),
+    getDegreeOut7d(accountId),
+    getFanOut1h(accountId),
+    getRoundTripFlag(accountId, txn.destination_account_id ?? null),
   ]).catch((err) => {
     // Never crash the flow on feature computation errors
     logger.warn(`[featureService] partial failure: ${err.message}`);
     return [1, 3, amount, 1, { meanAmount: amount, stdAmount: amount * 0.5, txnCount: 0 },
-            null, new Set(), null];
+            null, new Set(), null, 0, 0, 0];
   });
 
   const accountBalance = parseFloat(balanceRow?.balance ?? 0);
@@ -126,6 +135,11 @@ export const buildFeatureVector = async (txn, meta = {}) => {
     card_type                : txn.card_type   ?? 'debit',
     channel                  : channel,
 
+    // Graph / network features (new)
+    degree_out_7d            : degreeOut7d,    // unique destinations in 7 days
+    fan_out_1h               : fanOut1h,       // unique destinations in 1 hour
+    round_trip_flag          : roundTripFlag,  // 1 if A→B→A pattern detected
+
     // Pass-through for logging
     source_account_id        : txn.source_account_id ?? null,
     destination_account_id   : txn.destination_account_id ?? null,
@@ -135,7 +149,8 @@ export const buildFeatureVector = async (txn, meta = {}) => {
   logger.debug(
     `[featureService] txn=${txn.id} vel1h=${vel1h} vel24h=${vel24h} ` +
     `newDevice=${isNewDevice} countryMismatch=${countryMismatch} ` +
-    `balanceRatio=${(amount / (accountBalance + 1)).toFixed(2)}`
+    `balanceRatio=${(amount / (accountBalance + 1)).toFixed(2)} ` +
+    `degreeOut7d=${degreeOut7d} fanOut1h=${fanOut1h} roundTrip=${roundTripFlag}`
   );
 
   return features;

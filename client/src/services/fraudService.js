@@ -41,7 +41,8 @@ export const fraudService = {
     api.delete(`/fraud/notes/${noteId}`).then(r => r.data),
 
   // ── ML status ───────────────────────────────────────────────────────────────
-  mlStatus: () => api.get('/fraud/ml-status').then(r => r.data),
+  mlStatus : () => api.get('/fraud/ml-status').then(r => r.data),
+  mlMetrics: () => api.get('/fraud/ml-metrics').then(r => r.data),
 };
 
 export default fraudService;

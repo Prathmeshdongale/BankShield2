@@ -74,6 +74,14 @@ class TransactionFeatures(BaseModel):
     channel:   Optional[str] = Field("web",
                                      description="web | mobile | atm | pos | upi | neft | rtgs | imps | branch | api")
 
+    # ── Graph / network features ──────────────────────────────────────────────
+    degree_out_7d:   Optional[int] = Field(1, ge=0,
+                                          description="Unique destination accounts in last 7 days")
+    fan_out_1h:      Optional[int] = Field(0, ge=0,
+                                          description="Unique destination accounts in last 1 hour")
+    round_trip_flag: Optional[int] = Field(0, ge=0, le=1,
+                                          description="1 if A->B->A pattern detected in last 24h")
+
     # ── Legacy fields (kept for backward compatibility) ───────────────────────
     source_account_id:      Optional[str] = Field(None)
     destination_account_id: Optional[str] = Field(None)

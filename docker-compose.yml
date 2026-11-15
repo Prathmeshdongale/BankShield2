@@ -1,0 +1,105 @@
+version: "3.9"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# BankShield — Docker Compose
+# Services: postgres, ml-service (FastAPI), server (Express), client (Vite dev)
+#
+# Usage:
+#   docker compose up --build          # start all services
+#   docker compose up postgres server  # backend only (no ML, no UI)
+#   docker compose down -v             # stop and remove volumes
+# ──────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── PostgreSQL 15 ─────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:15-alpine
+    container_name: bankshield_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USER:-bankshield}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-bankshield_dev}
+      POSTGRES_DB: ${DB_NAME:-bankshield}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-bankshield}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── FastAPI ML Microservice ────────────────────────────────────────────────
+  ml-service:
+    build:
+      context: ./ml-service
+      dockerfile: Dockerfile
+    container_name: bankshield_ml
+    restart: unless-stopped
+    environment:
+      MODEL_DIR: /app/saved_models
+      FASTMCP_LOG_LEVEL: ERROR
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./ml-service/saved_models:/app/saved_models:ro
+      - ./ml-service/trained_models:/app/trained_models:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  # ── Express API Server ─────────────────────────────────────────────────────
+  server:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: bankshield_server
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ml-service:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 5000
+      DATABASE_URL: postgres://${DB_USER:-bankshield}:${DB_PASSWORD:-bankshield_dev}@postgres:5432/${DB_NAME:-bankshield}
+      ML_SERVICE_URL: http://ml-service:8000
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:-change_me_in_production}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-change_me_in_production}
+      FRAUD_BLOCK_THRESHOLD: ${FRAUD_BLOCK_THRESHOLD:-80}
+      FRAUD_FLAG_THRESHOLD: ${FRAUD_FLAG_THRESHOLD:-30}
+    ports:
+      - "5000:5000"
+    volumes:
+      - server_uploads:/app/uploads
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  # ── React/Vite Dev Server (development only) ───────────────────────────────
+  client:
+    build:
+      context: ./client
+      dockerfile: Dockerfile.dev
+    container_name: bankshield_client
+    restart: unless-stopped
+    depends_on:
+      - server
+    environment:
+      VITE_API_URL: http://server:5000
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./client/src:/app/src
+      - ./client/public:/app/public
+
+volumes:
+  postgres_data:
+  server_uploads:

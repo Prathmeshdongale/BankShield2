@@ -156,7 +156,7 @@ export const predictFraud = async (features) => {
   try {
     const res = await mlApi.post('/predict', features);
 
-    if (res.status !== 200 || !res.data?.fraud_probability) {
+    if (res.status !== 200 || res.data?.fraud_probability === undefined || res.data?.fraud_probability === null) {
       _recordFailure(`HTTP ${res.status}`);
       return fallbackScore(features);
     }
