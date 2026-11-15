@@ -1,0 +1,54 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# BankShield — Render.com Blueprint Configuration
+# Deploys both backend services via Render's Docker deployment
+# ──────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── Express API Backend ─────────────────────────────────────────────────────
+  - type: web
+    name: bankshield-api
+    runtime: docker
+    region: oregon
+    plan: starter
+    dockerfilePath: ./server/Dockerfile
+    dockerContext: ./server
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 5000
+      - key: DATABASE_URL
+        sync: false
+      - key: ML_SERVICE_URL
+        value: https://bankshield-ml.onrender.com
+      - key: JWT_SECRET
+        sync: false
+      - key: JWT_REFRESH_SECRET
+        sync: false
+      - key: FRAUD_BLOCK_THRESHOLD
+        value: "80"
+      - key: FRAUD_FLAG_THRESHOLD
+        value: "30"
+      - key: API_RATE_LIMIT_MAX
+        value: "500"
+
+  # ── FastAPI ML Fraud Detection Service ──────────────────────────────────────
+  - type: web
+    name: bankshield-ml
+    runtime: docker
+    region: oregon
+    plan: starter
+    dockerfilePath: ./ml-service/Dockerfile
+    dockerContext: ./ml-service
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: MODEL_DIR
+        value: /app/saved_models
+      - key: FASTAPI_WORKERS
+        value: "2"
+      - key: PYTHONUNBUFFERED
+        value: "1"

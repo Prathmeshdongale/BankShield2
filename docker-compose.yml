@@ -1,14 +1,15 @@
 version: "3.9"
 
-# ──────────────────────────────────────────────────────────────────────────────
-# BankShield — Docker Compose
-# Services: postgres, ml-service (FastAPI), server (Express), client (Vite dev)
+# ═══════════════════════════════════════════════════════════════════════════════
+# BankShield — Docker Compose for Local CI Testing
+# ═══════════════════════════════════════════════════════════════════════════════
 #
 # Usage:
 #   docker compose up --build          # start all services
 #   docker compose up postgres server  # backend only (no ML, no UI)
 #   docker compose down -v             # stop and remove volumes
-# ──────────────────────────────────────────────────────────────────────────────
+#
+# ═══════════════════════════════════════════════════════════════════════════════
 
 services:
 
@@ -40,7 +41,7 @@ services:
     restart: unless-stopped
     environment:
       MODEL_DIR: /app/saved_models
-      FASTMCP_LOG_LEVEL: ERROR
+      PYTHONUNBUFFERED: "1"
     ports:
       - "8000:8000"
     volumes:
@@ -69,10 +70,11 @@ services:
       PORT: 5000
       DATABASE_URL: postgres://${DB_USER:-bankshield}:${DB_PASSWORD:-bankshield_dev}@postgres:5432/${DB_NAME:-bankshield}
       ML_SERVICE_URL: http://ml-service:8000
-      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:-change_me_in_production}
+      JWT_SECRET: ${JWT_SECRET:-change_me_in_production}
       JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-change_me_in_production}
       FRAUD_BLOCK_THRESHOLD: ${FRAUD_BLOCK_THRESHOLD:-80}
       FRAUD_FLAG_THRESHOLD: ${FRAUD_FLAG_THRESHOLD:-30}
+      API_RATE_LIMIT_MAX: ${API_RATE_LIMIT_MAX:-500}
     ports:
       - "5000:5000"
     volumes:
@@ -83,22 +85,17 @@ services:
       timeout: 5s
       retries: 5
 
-  # ── React/Vite Dev Server (development only) ───────────────────────────────
+  # ── React/Vite Dev Server (local CI smoke test) ───────────────────────────
   client:
     build:
       context: ./client
-      dockerfile: Dockerfile.dev
+      dockerfile: Dockerfile
     container_name: bankshield_client
     restart: unless-stopped
     depends_on:
       - server
-    environment:
-      VITE_API_URL: http://server:5000
     ports:
-      - "5173:5173"
-    volumes:
-      - ./client/src:/app/src
-      - ./client/public:/app/public
+      - "4173:4173"
 
 volumes:
   postgres_data:
