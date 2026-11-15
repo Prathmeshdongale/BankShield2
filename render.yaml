@@ -11,8 +11,8 @@ services:
     runtime: docker
     region: oregon
     plan: starter
+    dockerContext: .
     dockerfilePath: ./server/Dockerfile
-    dockerContext: ./server
     healthCheckPath: /health
     autoDeploy: true
     envVars:
@@ -41,8 +41,8 @@ services:
     runtime: docker
     region: oregon
     plan: starter
+    dockerContext: .
     dockerfilePath: ./ml-service/Dockerfile
-    dockerContext: ./ml-service
     healthCheckPath: /health
     autoDeploy: true
     envVars:

@@ -10,7 +10,7 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential gcc g++ && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
+COPY ml-service/requirements.txt .
 RUN pip install --no-cache-dir --user -r requirements.txt
 
 # ── Production image ─────────────────────────────────────────────────────────
@@ -26,13 +26,15 @@ ENV PATH=/root/.local/bin:$PATH
 ENV PYTHONPATH=/app
 
 # Copy application code
-COPY app/ ./app/
+COPY ml-service/app/ ./app/
 
-# Copy model artifacts (only saved_models needed for inference)
-COPY saved_models/ ./saved_models/
+# Create saved_models directory — model file added at runtime
+# If no model file present, ML service uses heuristic fallback (still functional)
+RUN mkdir -p /app/saved_models
 
 # Environment defaults
 ENV MODEL_DIR=/app/saved_models \
+    MODEL_FILE=/app/saved_models/xgboost_fraud_model.joblib \
     FASTAPI_WORKERS=2 \
     PYTHONUNBUFFERED=1
 
