@@ -17,8 +17,11 @@ import tokenStore from './tokenStore';
 
 // ── Instance ──────────────────────────────────────────────────────────────────
 // In dev: Vite proxy forwards /api → http://localhost:5000
-// In production (Vercel): vercel.json rewrites /api → Render backend URL
-const BASE_URL = import.meta.env.VITE_API_URL || '/api';
+// In production: direct connection to Render backend
+const PROD_API_URL = 'https://bankshield-api-5m3j.onrender.com/api';
+const BASE_URL = import.meta.env.PROD
+  ? (import.meta.env.VITE_API_URL || PROD_API_URL)
+  : '/api';
 
 export const api = axios.create({
   baseURL : BASE_URL,
@@ -85,7 +88,7 @@ api.interceptors.response.use(
     }
 
     try {
-      const { data } = await axios.post('/api/auth/refresh', { refreshToken });
+      const { data } = await axios.post(`${BASE_URL}/auth/refresh`, { refreshToken });
       const { accessToken, refreshToken: newRefresh } = data.data;
 
       tokenStore.setTokens(accessToken, newRefresh);
