@@ -28,9 +28,8 @@ ENV PYTHONPATH=/app
 # Copy application code
 COPY app/ ./app/
 
-# Copy model artifacts (Git LFS or build-time copy)
+# Copy model artifacts (only saved_models needed for inference)
 COPY saved_models/ ./saved_models/
-COPY trained_models/ ./trained_models/
 
 # Environment defaults
 ENV MODEL_DIR=/app/saved_models \

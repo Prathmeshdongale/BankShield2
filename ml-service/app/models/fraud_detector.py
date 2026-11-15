@@ -40,16 +40,21 @@ MODEL_VERSION = "xgboost-v2.0"
 
 def _load_threshold() -> float:
     """Read the optimal threshold saved by notebooks/train.py, if available."""
-    thresh_path = Path(settings.MODEL_DIR).parent / "trained_models" / "threshold.json"
-    if thresh_path.exists():
-        try:
-            with open(thresh_path) as f:
-                data = json.load(f)
-            t = float(data.get("threshold", _DEFAULT_FLAG_THRESHOLD))
-            logger.info(f"Loaded decision threshold {t:.4f} from {thresh_path}")
-            return t
-        except Exception as e:
-            logger.warning(f"Could not read threshold.json: {e}")
+    # Try trained_models/ first (local dev), then saved_models/ (Docker/Render)
+    candidates = [
+        Path(settings.MODEL_DIR).parent / "trained_models" / "threshold.json",
+        Path(settings.MODEL_DIR) / "threshold.json",           # saved_models/threshold.json
+    ]
+    for thresh_path in candidates:
+        if thresh_path.exists():
+            try:
+                with open(thresh_path) as f:
+                    data = json.load(f)
+                t = float(data.get("threshold", _DEFAULT_FLAG_THRESHOLD))
+                logger.info(f"Loaded decision threshold {t:.4f} from {thresh_path}")
+                return t
+            except Exception as e:
+                logger.warning(f"Could not read threshold.json: {e}")
     return _DEFAULT_FLAG_THRESHOLD
 
 
