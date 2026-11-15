@@ -31,3 +31,4 @@ typing_extensions==4.16.0
 tzdata==2026.5
 uvicorn==0.54.0
 xgboost==3.2.0
+mlflow==2.22.0

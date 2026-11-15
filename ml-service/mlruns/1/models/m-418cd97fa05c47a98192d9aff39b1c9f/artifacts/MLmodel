@@ -1,0 +1,22 @@
+artifact_path: file:///D:/B Tech/bankshield/ml-service/mlruns/1/models/m-418cd97fa05c47a98192d9aff39b1c9f/artifacts
+flavors:
+  python_function:
+    data: model.ubj
+    env:
+      conda: conda.yaml
+      virtualenv: python_env.yaml
+    loader_module: mlflow.xgboost
+    python_version: 3.11.9
+  xgboost:
+    code: null
+    data: model.ubj
+    model_class: xgboost.sklearn.XGBClassifier
+    model_format: ubj
+    xgb_version: 3.2.0
+mlflow_version: 3.18.0
+model_id: m-418cd97fa05c47a98192d9aff39b1c9f
+model_size_bytes: 560699
+model_uuid: m-418cd97fa05c47a98192d9aff39b1c9f
+prompts: null
+run_id: f48eef1feeb2466698f328397aae0173
+utc_time_created: '2026-11-15 13:04:43.022672'
