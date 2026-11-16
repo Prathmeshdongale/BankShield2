@@ -17,8 +17,14 @@ import tokenStore from './tokenStore';
 
 // ── Instance ──────────────────────────────────────────────────────────────────
 // Dev:  Vite proxy forwards /api → http://localhost:5000
-// Prod: Uses VITE_API_URL env var set in Vercel dashboard (Settings > Environment Variables)
-const BASE_URL = import.meta.env.VITE_API_URL || '/api';
+// Prod: Uses VITE_API_URL env var (domain only or full URL with /api)
+//       Automatically appends /api if missing, so both work:
+//         VITE_API_URL=https://bankshield-api-5m3j.onrender.com  → /api appended
+//         VITE_API_URL=https://bankshield-api-5m3j.onrender.com/api → used as-is
+const _origin = import.meta.env.VITE_API_URL || '';
+const BASE_URL = _origin
+  ? (_origin.endsWith('/api') ? _origin : _origin.replace(/\/$/, '') + '/api')
+  : '/api';
 
 export const api = axios.create({
   baseURL : BASE_URL,
