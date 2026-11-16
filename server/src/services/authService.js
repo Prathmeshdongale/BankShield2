@@ -299,7 +299,7 @@ export const loginUser = async ({ email, password }, meta = {}) => {
       email: user.email,
       role: user.role,
       firstName: user.first_name,
-      devOtp: process.env.NODE_ENV !== 'production' ? otp : null,
+      devOtp: process.env.NODE_ENV !== 'production' ? otp : (process.env.OTP_DEV_HELPER === 'true' ? otp : null),
     };
   }
 
@@ -329,7 +329,7 @@ export const loginUser = async ({ email, password }, meta = {}) => {
     email: user.email,
     role: user.role,
     firstName: user.first_name,
-    devOtp: process.env.NODE_ENV !== 'production' ? otp : undefined,
+    devOtp: process.env.NODE_ENV !== 'production' || process.env.OTP_DEV_HELPER === 'true' ? otp : undefined,
   };
 };
 
@@ -627,7 +627,7 @@ export const sendSuperAdminOtp = async (email) => {
     role: 'super_admin',
     firstName: user.first_name,
     message: 'Super Admin verification code dispatched to email.',
-    devOtp: process.env.NODE_ENV !== 'production' ? otp : undefined,
+    devOtp: process.env.NODE_ENV !== 'production' || process.env.OTP_DEV_HELPER === 'true' ? otp : undefined,
   };
 };
 
@@ -771,7 +771,7 @@ export const resendLoginOtp = async (email) => {
   return {
     message: 'New verification OTP sent to your registered email.',
     email: user.email,
-    devOtp: process.env.NODE_ENV !== 'production' ? otp : undefined,
+    devOtp: process.env.NODE_ENV !== 'production' || process.env.OTP_DEV_HELPER === 'true' ? otp : undefined,
   };
 };
 
