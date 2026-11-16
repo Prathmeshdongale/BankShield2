@@ -76,7 +76,7 @@ const Register = () => {
       if (err?.response?.data?.error) {
         setApiError(err.response.data.error);
       } else if (!err?.response || err?.code === 'ERR_NETWORK') {
-        setApiError('Unable to connect to backend server. Please verify that the server is running on http://localhost:5000.');
+        setApiError('Unable to connect to the server. Please check your internet connection and try again.');
       } else {
         setApiError('Registration failed. Please review your information and try again.');
       }

@@ -3,17 +3,19 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 
-export default defineConfig({
+export default defineConfig(({ mode }) => ({
   plugins: [
     react(),
     tailwindcss(),
   ],
   define: {
-    // Inject VITE_API_URL at build time — works on Vercel regardless of .env file loading
-    // Can be overridden by Vercel dashboard env var or .env.production
-    'import.meta.env.VITE_API_URL': JSON.stringify(
-      process.env.VITE_API_URL || 'https://bankshield-api-5m3j.onrender.com/api'
-    )
+    // __API_BASE_URL__ is a plain global — not intercepted by Vite's env handling.
+    // Always set to the Render URL in production builds.
+    // In dev: empty string → api.js falls back to '/api' (Vite proxy).
+    __API_BASE_URL__: JSON.stringify(
+      process.env.VITE_API_URL ||
+      (mode === 'production' ? 'https://bankshield-api-5m3j.onrender.com/api' : '')
+    ),
   },
   resolve: {
     alias: {
@@ -33,4 +35,4 @@ export default defineConfig({
       },
     },
   },
-})
+}))

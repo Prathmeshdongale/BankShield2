@@ -14,20 +14,13 @@
 
 import axios from 'axios';
 import tokenStore from './tokenStore';
+import { API_BASE_URL } from '../config';
 
 // ── Instance ──────────────────────────────────────────────────────────────────
-// Dev:  Vite proxy forwards /api → http://localhost:5000
-// Prod: Uses VITE_API_URL env var (domain only or full URL with /api)
-//       Automatically appends /api if missing, so both work:
-//         VITE_API_URL=https://bankshield-api-5m3j.onrender.com  → /api appended
-//         VITE_API_URL=https://bankshield-api-5m3j.onrender.com/api → used as-is
-const _origin = import.meta.env.VITE_API_URL || '';
-const BASE_URL = _origin
-  ? (_origin.endsWith('/api') ? _origin : _origin.replace(/\/$/, '') + '/api')
-  : '/api';
-
+// Dev:  /api  → Vite proxy → http://localhost:5000
+// Prod: https://bankshield-api-5m3j.onrender.com/api (set in vite.config.js define)
 export const api = axios.create({
-  baseURL : BASE_URL,
+  baseURL : API_BASE_URL,
   timeout : 15_000,
   headers : { 'Content-Type': 'application/json' },
 });
@@ -91,7 +84,7 @@ api.interceptors.response.use(
     }
 
     try {
-      const { data } = await axios.post(`${BASE_URL}/auth/refresh`, { refreshToken });
+      const { data } = await axios.post(`${API_BASE_URL}/auth/refresh`, { refreshToken });
       const { accessToken, refreshToken: newRefresh } = data.data;
 
       tokenStore.setTokens(accessToken, newRefresh);
